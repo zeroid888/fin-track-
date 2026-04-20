@@ -1,0 +1,9 @@
+{
+  "appId": "com.daniel.fintrack",
+  "appName": "Мои финансы",
+  "webDir": "dist",
+  "ios": {
+    "contentInset": "automatic",
+    "backgroundColor": "#0d0f14"
+  }
+}
