@@ -815,6 +815,11 @@
   </div>
 
   <div class="card">
+    <div class="card-title">С какой зарплаты что платить</div>
+    <div id="dash-paycheck-split"></div>
+  </div>
+
+  <div class="card">
     <div class="card-title">Календарь ближайших 14 дней</div>
     <div id="dash-upcoming"></div>
   </div>
@@ -947,6 +952,15 @@
       </select>
       <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
         Для ежедневного дохода типа Bitzone удобно: выбери свой крипто-счёт, и кнопкой «Зафиксировать сегодня» в списке ниже ты будешь одним тапом добавлять начисление за день и пополнять счёт.
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Зарезервировать под расход (не обязательно)</label>
+      <select id="inc-earmark">
+        <option value="">— этот доход распределяется свободно —</option>
+      </select>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
+        💡 Если выбрать расход (например <strong>Квартира</strong>), этот доход больше <strong>не будет распыляться</strong> на цели, привычки и дневной бюджет. Он копится на выбранный расход. Излишек остаётся «в запасе» на тот же расход.
       </div>
     </div>
     <button class="btn btn-primary" onclick="addIncome()">+ Добавить</button>
@@ -1158,6 +1172,16 @@
     <div style="font-size:11px;color:var(--muted);margin-top:-4px;margin-bottom:14px;line-height:1.5" id="cr-sched-hint">
       Укажи день, в который платёж уходит с карты — он попадёт в календарь ближайших списаний.
     </div>
+    <div class="form-group">
+      <label>Списывается с баланса (не обязательно)</label>
+      <select id="cr-balance">
+        <option value="">— не списывать, только учесть в плане —</option>
+      </select>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
+        ✅ <strong>Если указан «День списания» и выбран счёт</strong> — в день платежа появится напоминание: «Списать с баланса?», «Уже оплатил сам» или «Пропустить». <br>
+        Остаток долга уменьшается автоматически при подтверждении.
+      </div>
+    </div>
     <button class="btn btn-primary" onclick="addCredit()">+ Добавить</button>
   </div>
 
@@ -1204,6 +1228,38 @@
       <input id="bal-emoji" type="text" maxlength="2" placeholder="💳 / 🪙 / 💵 / 🏦">
     </div>
     <button class="btn btn-primary" onclick="addBalance()">+ Добавить баланс</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🔄 Перевод между своими счетами</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5">
+      Снял USDT с Binance, обменял на рубли, пополнил карту. Или наоборот. Если валюты счетов разные — поставь курс, по которому реально поменял (крипта-биржи дают курс хуже Google). Если одинаковые — курс не нужен.
+    </div>
+    <div class="form-group">
+      <label>Откуда (снимаем)</label>
+      <select id="conv-from"></select>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label>Сколько снимаем <span id="conv-from-cur" style="color:var(--muted);font-weight:400"></span></label>
+        <input id="conv-amount" type="number" step="0.01" placeholder="0" oninput="updateConvertPreview()">
+      </div>
+      <div class="form-group">
+        <label>Куда (пополняем)</label>
+        <select id="conv-to" onchange="updateConvertPreview()"></select>
+      </div>
+    </div>
+    <div class="form-group" id="conv-rate-wrap">
+      <label>Курс обмена (1 ед. исходной валюты = ? ед. валюты получения)</label>
+      <input id="conv-rate" type="number" step="0.0001" placeholder="0" oninput="updateConvertPreview()">
+      <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5" id="conv-rate-hint">Подставим автоматически из курсов валют — поменяй, если обменял по другому курсу.</div>
+    </div>
+    <div class="form-group">
+      <label>Дата перевода</label>
+      <input id="conv-date" type="date">
+    </div>
+    <div id="conv-preview" style="font-size:13px;color:var(--muted);margin:10px 0 14px;line-height:1.6;padding:10px 12px;background:var(--surface2);border-radius:10px;display:none"></div>
+    <button class="btn btn-primary" onclick="convertBetweenBalances()">🔄 Перевести</button>
   </div>
 
   <div id="balance-list"></div>
@@ -1468,6 +1524,7 @@ function load() {
         if (!['RUB','USD','USDT'].includes(i.currency)) i.currency = 'RUB';
         if (!Array.isArray(i.paidLog)) i.paidLog = [];           // ISO даты подтверждённых выплат
         if (!Array.isArray(i.skippedPayDates)) i.skippedPayDates = []; // ISO даты пропущенных
+        if (typeof i.earmarkedFor === 'undefined') i.earmarkedFor = null; // expense.id, на который зарезервирован этот доход
       });
       state.transactions.forEach(t => {
         if (!t.id) t.id = safeId();
@@ -1492,6 +1549,10 @@ function load() {
           c.term = c.months || 0;
           c.termUnit = 'months';
         }
+        // Автосписание с конкретного баланса + лог подтверждённых списаний
+        if (typeof c.balanceId === 'undefined') c.balanceId = null;
+        if (!Array.isArray(c.deductionLog)) c.deductionLog = [];
+        if (!Array.isArray(c.skippedMonths)) c.skippedMonths = [];
       });
       state.expenses.forEach(e => {
         if (typeof e.payDay !== 'number' || e.payDay < 1 || e.payDay > 31) e.payDay = (e.payDay === null ? null : null);
@@ -1601,6 +1662,51 @@ function totalIncome() { return state.incomes.reduce((s, i) => s + monthlyIncome
 function totalExpenses() { return state.expenses.reduce((s, e) => s + e.amount, 0); }
 function totalCredits() { return state.credits.reduce((s, c) => s + creditMonthlyEq(c), 0); }
 function totalGoalsMonthly() { return state.goals.reduce((s, g) => s + (g.monthly || 0), 0); }
+// ===== EARMARKED INCOME =====
+// Доход, зарезервированный под конкретный расход (BitZone → Квартира),
+// не распыляется на цели / дневной бюджет.
+function isEarmarkedIncome(i) {
+  if (!i || !i.earmarkedFor) return false;
+  return !!(state.expenses || []).find(e => e.id === i.earmarkedFor);
+}
+function earmarkedIncomeTotal() {
+  return (state.incomes || []).reduce((s, i) => s + (isEarmarkedIncome(i) ? monthlyIncome(i) : 0), 0);
+}
+// Сколько приходит в месяц на конкретный расход
+function earmarkedCoverage(expenseId) {
+  return (state.incomes || []).reduce((s, i) =>
+    s + (i.earmarkedFor === expenseId ? monthlyIncome(i) : 0), 0);
+}
+// Сколько покрыто (capped at expense amount — излишек остаётся «накоплением»)
+function totalEarmarkedCovered() {
+  return (state.expenses || []).reduce((s, e) => {
+    const cov = earmarkedCoverage(e.id);
+    return s + Math.min(e.amount || 0, cov);
+  }, 0);
+}
+function freeIncome() { return Math.max(0, totalIncome() - earmarkedIncomeTotal()); }
+function uncoveredExpensesTotal() { return Math.max(0, totalExpenses() - totalEarmarkedCovered()); }
+
+// Средний ежедневный «чек жизни» — средние реальные траты (transactions) на день
+// за период всей накопленной истории. Исключаются переводы между своими картами.
+function averageDailyLifeSpend() {
+  const txs = (state.transactions || []).filter(t =>
+    t.type === 'expense' &&
+    t.cat !== '🔄 Между своими' &&
+    t.amount > 0 &&
+    /^\d{4}-\d{2}-\d{2}$/.test(t.date || '')
+  );
+  if (txs.length === 0) return 0;
+  const dates = txs.map(t => t.date).sort();
+  const fromStr = dates[0];
+  const toStr = dates[dates.length - 1];
+  const from = new Date(fromStr + 'T00:00:00');
+  const to = new Date(toStr + 'T00:00:00');
+  if (isNaN(from) || isNaN(to)) return 0;
+  const days = Math.max(1, Math.round((to - from) / (24 * 3600 * 1000)) + 1);
+  const sum = txs.reduce((s, t) => s + (t.amount || 0), 0);
+  return sum / days;
+}
 // Сколько раз в месяц случается привычка с данной частотой
 function habitOccurrencesPerMonth(freq) {
   switch (freq) {
@@ -1638,7 +1744,8 @@ function totalHabitsMonthly() {
   return (state.habits || []).reduce((s, h) => s + habitMonthlyCost(h), 0);
 }
 function totalPlannedCommitments() { return totalExpenses() + totalCredits() + totalGoalsMonthly() + totalHabitsMonthly(); }
-function free() { return totalIncome() - totalPlannedCommitments(); }
+// «Свободный» месячный остаток с учётом зарезервированных доходов (BitZone → квартира и т.п.)
+function free() { return freeIncome() - uncoveredExpensesTotal() - totalCredits() - totalGoalsMonthly() - totalHabitsMonthly(); }
 function daysInMonth() {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -1999,7 +2106,7 @@ function getCashflowSnapshot() {
   const rawDaily = leftBeforeNext > 0 ? leftBeforeNext / budgetDays : 0;
   // Устойчивый дневной бюджет — от месячного свободного остатка (доход - обязательные - кредиты - привычки - накопления на цели)
   const habitsMonthly = totalHabitsMonthly();
-  const monthlyFree = totalIncome() - totalExpenses() - totalCredits() - totalGoalsMonthly() - habitsMonthly;
+  const monthlyFree = freeIncome() - uncoveredExpensesTotal() - totalCredits() - totalGoalsMonthly() - habitsMonthly;
   const sustainableDaily = monthlyFree > 0 ? monthlyFree / 30 : 0;
 
   // Умный выбор: если выплата близко (меньше 3 дней) — НЕ используем rawDaily, чтобы он не давал абсурдные значения
@@ -2110,6 +2217,8 @@ function addIncome() {
     const payDay2 = parseAmount(document.getElementById('inc-payday-2')?.value);
     const balSel = document.getElementById('inc-balance');
     const balanceId = balSel ? balSel.value : '';
+    const earmarkSel = document.getElementById('inc-earmark');
+    const earmarkedFor = earmarkSel ? earmarkSel.value : '';
     let payDays = [];
     if (!name) { alert('Укажи название источника дохода'); return; }
     if (isNaN(amount) || amount <= 0) { alert('Укажи сумму дохода больше 0'); return; }
@@ -2121,7 +2230,7 @@ function addIncome() {
     if (freq === 'weekly') payDays = normalizePayDays(freq, [payDay1]);
     if (freq === 'yearly') payDays = normalizePayDays(freq, [payDay1]);
 
-    state.incomes.push({ id: safeId(), name, amount, currency, type, freq, payDays, balanceId: balanceId || null });
+    state.incomes.push({ id: safeId(), name, amount, currency, type, freq, payDays, balanceId: balanceId || null, earmarkedFor: earmarkedFor || null });
     save();
     document.getElementById('inc-name').value = '';
     document.getElementById('inc-amount').value = '';
@@ -2129,6 +2238,7 @@ function addIncome() {
     if (document.getElementById('inc-payday-1')) document.getElementById('inc-payday-1').value = '';
     if (document.getElementById('inc-payday-2')) document.getElementById('inc-payday-2').value = '';
     if (balSel) balSel.value = '';
+    if (earmarkSel) earmarkSel.value = '';
     renderAll();
   } catch (e) { console.error(e); alert('Ошибка: ' + e.message); }
 }
@@ -2368,6 +2478,120 @@ function markDeductionSkipped(expId, monthKey) {
   return true;
 }
 
+// ===== Плановые списания по КРЕДИТАМ (зеркало findPendingDeductions) =====
+// Ключ лога для кредита: 'YYYY-MM' для monthly/semimonthly-дня + '-D' (день), а для biweekly/weekly — полный ISO
+function creditChargeKey(cr, dateObj) {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const d = String(dateObj.getDate()).padStart(2, '0');
+  if (cr.freq === 'monthly') return `${y}-${m}`;
+  if (cr.freq === 'semimonthly') return `${y}-${m}-${d}`;
+  return `${y}-${m}-${d}`; // biweekly / weekly
+}
+
+function findPendingCreditDeductions() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const pending = [];
+
+  (state.credits || []).forEach(cr => {
+    if (!cr.balanceId) return;
+    if (!Array.isArray(cr.deductionLog)) cr.deductionLog = [];
+    if (!Array.isArray(cr.skippedMonths)) cr.skippedMonths = [];
+    const bal = state.balances.find(b => b.id === cr.balanceId);
+    if (!bal) return;
+
+    // Ищем все даты платежей от начала текущего месяца до сегодня включительно
+    const from = new Date(today.getFullYear(), today.getMonth(), 1);
+    const dates = creditChargeDatesInRange(cr, from, today);
+    dates.forEach(d => {
+      const key = creditChargeKey(cr, d);
+      if (cr.deductionLog.includes(key)) return;
+      if (cr.skippedMonths.includes(key)) return;
+
+      const deduct = fromRub(cr.monthly || 0, bal.currency);
+      const overdueDays = Math.max(0, Math.floor((today - d) / (24 * 3600 * 1000)));
+      pending.push({
+        crId: cr.id,
+        balId: bal.id,
+        name: cr.name,
+        payDay: d.getDate(),
+        payDateObj: d,
+        overdueDays,
+        amount: deduct,
+        amountRub: cr.monthly || 0,
+        currency: bal.currency,
+        balanceName: bal.name,
+        chargeKey: key,
+      });
+    });
+  });
+
+  return pending;
+}
+
+// Подтверждённое списание кредита: снимаем с баланса и уменьшаем остаток долга
+function applyCreditDeduction(crId, chargeKey) {
+  const cr = state.credits.find(c => c.id === crId);
+  if (!cr) return false;
+  if (!Array.isArray(cr.deductionLog)) cr.deductionLog = [];
+  if (cr.deductionLog.includes(chargeKey)) return false;
+  const bal = state.balances.find(b => b.id === cr.balanceId);
+  if (!bal) return false;
+  const deduct = fromRub(cr.monthly || 0, bal.currency);
+  bal.amount = Math.round((bal.amount - deduct) * 100) / 100;
+  // Остаток долга уменьшается на сумму платежа в рублях (приближённо, без учёта %)
+  cr.total = Math.max(0, Math.round(((cr.total || 0) - (cr.monthly || 0)) * 100) / 100);
+  cr.deductionLog.push(chargeKey);
+  save();
+  return true;
+}
+
+// «Уже оплатил сам» — баланс не трогаем, долг уменьшаем, помечаем как обработано
+function markCreditPaidExternally(crId, chargeKey) {
+  const cr = state.credits.find(c => c.id === crId);
+  if (!cr) return false;
+  if (!Array.isArray(cr.deductionLog)) cr.deductionLog = [];
+  if (!cr.deductionLog.includes(chargeKey)) cr.deductionLog.push(chargeKey);
+  cr.total = Math.max(0, Math.round(((cr.total || 0) - (cr.monthly || 0)) * 100) / 100);
+  save();
+  return true;
+}
+
+// «Пропустить» — просто помечаем ключ, без уменьшения долга и баланса
+function markCreditSkipped(crId, chargeKey) {
+  const cr = state.credits.find(c => c.id === crId);
+  if (!cr) return false;
+  if (!Array.isArray(cr.skippedMonths)) cr.skippedMonths = [];
+  if (!cr.skippedMonths.includes(chargeKey)) cr.skippedMonths.push(chargeKey);
+  save();
+  return true;
+}
+
+// Разовое «внесение» с баланса вне расписания (кнопка «Погасить сейчас»)
+function payCreditNow(crId) {
+  const cr = state.credits.find(c => c.id === crId);
+  if (!cr) return;
+  const input = window.prompt(`Сколько внести в счёт «${cr.name}»? (₽)\nПо умолчанию — один платёж: ${cr.monthly || 0}.`, String(cr.monthly || 0));
+  if (input === null) return;
+  const amt = parseFloat(String(input).replace(',', '.'));
+  if (!isFinite(amt) || amt <= 0) { alert('Некорректная сумма.'); return; }
+  if (cr.balanceId) {
+    const bal = state.balances.find(b => b.id === cr.balanceId);
+    if (bal) {
+      const deduct = fromRub(amt, bal.currency);
+      if (bal.amount < deduct) {
+        if (!confirm(`На «${bal.name}» только ${fmtCur(bal.amount, bal.currency)}, а нужно ${fmtCur(deduct, bal.currency)}. Всё равно списать?`)) return;
+      }
+      bal.amount = Math.round((bal.amount - deduct) * 100) / 100;
+    }
+  }
+  cr.total = Math.max(0, Math.round(((cr.total || 0) - amt) * 100) / 100);
+  save();
+  toast(`Внесено ${fmt(amt)} в счёт «${cr.name}»`, 'good');
+  renderAll();
+}
+
 // Совместимость со старым именем (на всякий случай — теперь ничего не списывает)
 function processScheduledDeductions() {
   return [];
@@ -2539,6 +2763,8 @@ function deleteExpense(id) {
     }
   }
   state.expenses = state.expenses.filter(e => e.id !== id);
+  // Отвязываем доходы, которые были зарезервированы на этот расход
+  (state.incomes || []).forEach(inc => { if (inc.earmarkedFor === id) inc.earmarkedFor = null; });
   save(); renderAll();
 }
 
@@ -2568,11 +2794,35 @@ function refreshIncomeBalanceSelect() {
   if (current && state.balances.find(b => b.id === current)) sel.value = current;
 }
 
+function refreshIncomeEarmarkSelect() {
+  const sel = document.getElementById('inc-earmark');
+  if (!sel) return;
+  const current = sel.value;
+  let html = '<option value="">— этот доход распределяется свободно —</option>';
+  (state.expenses || []).forEach(e => {
+    html += `<option value="${e.id}">🏠 ${e.name} (${fmt(e.amount)})</option>`;
+  });
+  sel.innerHTML = html;
+  if (current && (state.expenses || []).find(e => e.id === current)) sel.value = current;
+}
+
 function refreshTransactionBalanceSelect() {
   const sel = document.getElementById('tx-balance');
   if (!sel) return;
   const current = sel.value;
   let html = '<option value="">— не списывать, только учесть в тратах —</option>';
+  state.balances.forEach(b => {
+    html += `<option value="${b.id}">${b.emoji || '💳'} ${b.name} (${fmtCur(b.amount, b.currency)})</option>`;
+  });
+  sel.innerHTML = html;
+  if (current && state.balances.find(b => b.id === current)) sel.value = current;
+}
+
+function refreshCreditBalanceSelect() {
+  const sel = document.getElementById('cr-balance');
+  if (!sel) return;
+  const current = sel.value;
+  let html = '<option value="">— не списывать, только учесть в плане —</option>';
   state.balances.forEach(b => {
     html += `<option value="${b.id}">${b.emoji || '💳'} ${b.name} (${fmtCur(b.amount, b.currency)})</option>`;
   });
@@ -2682,6 +2932,8 @@ function addCredit() {
 
     const freq = (freqEl && freqEl.value) || 'monthly';
     const anchorDate = (anchorEl && anchorEl.value) || null;
+    const balanceEl = document.getElementById('cr-balance');
+    const balanceId = (balanceEl && balanceEl.value) || null;
 
     // Процент собираем из того поля, которое сейчас видно
     let rate;
@@ -2734,7 +2986,10 @@ function addCredit() {
       payDay,                       // для monthly
       payDays,                      // [dayA, dayB] для semimonthly
       freq,
-      anchorDate
+      anchorDate,
+      balanceId: balanceId || null, // с какого счёта списывается
+      deductionLog: [],             // ключи уже подтверждённых списаний (YYYY-MM или YYYY-MM-DD)
+      skippedMonths: []
     });
     save();
     nameEl.value = '';
@@ -2748,6 +3003,7 @@ function addCredit() {
     if (payDayAEl) payDayAEl.value = '';
     if (payDayBEl) payDayBEl.value = '';
     if (anchorEl) anchorEl.value = '';
+    if (balanceEl) balanceEl.value = '';
     if (freqEl) freqEl.value = 'monthly';
     if (termUnitEl) termUnitEl.value = 'months';
     updateCreditScheduleFields();
@@ -2804,8 +3060,9 @@ function addBalance() {
 function deleteBalance(id) {
   if (!confirm('Удалить этот баланс?')) return;
   state.balances = state.balances.filter(b => b.id !== id);
-  // Также обнулить ссылки в расходах на удалённый баланс
+  // Также обнулить ссылки в расходах и кредитах на удалённый баланс
   state.expenses.forEach(e => { if (e.balanceId === id) e.balanceId = null; });
+  state.credits.forEach(c => { if (c.balanceId === id) c.balanceId = null; });
   save(); renderAll();
 }
 
@@ -2827,6 +3084,186 @@ function saveRates() {
   if (!isNaN(t) && t > 0) state.rates.USDT = t;
   save(); renderAll();
   alert('Курсы сохранены');
+}
+
+// ===== CONVERT BETWEEN BALANCES (снял с крипты, поменял на рубли и т.п.) =====
+function refreshConvertSelects() {
+  const fromSel = document.getElementById('conv-from');
+  const toSel = document.getElementById('conv-to');
+  const dateEl = document.getElementById('conv-date');
+  if (!fromSel || !toSel) return;
+  const curFrom = fromSel.value;
+  const curTo = toSel.value;
+  const balances = state.balances || [];
+  const optsHtml = balances.map(b =>
+    `<option value="${b.id}">${b.emoji || '💳'} ${b.name} (${fmtCur(b.amount, b.currency)})</option>`
+  ).join('');
+  fromSel.innerHTML = '<option value="">— выбери счёт —</option>' + optsHtml;
+  toSel.innerHTML = '<option value="">— выбери счёт —</option>' + optsHtml;
+  if (curFrom && balances.find(b => b.id === curFrom)) fromSel.value = curFrom;
+  if (curTo && balances.find(b => b.id === curTo)) toSel.value = curTo;
+  if (dateEl && !dateEl.value) dateEl.value = todayIso();
+  // обновить подсказку валюты и превью
+  updateConvertPreview();
+  // повесим обработчик на from один раз
+  if (!fromSel._convBound) {
+    fromSel.addEventListener('change', updateConvertPreview);
+    fromSel._convBound = true;
+  }
+}
+
+function suggestedConvRate(fromCur, toCur) {
+  if (!fromCur || !toCur) return null;
+  if (fromCur === toCur) return 1;
+  const rates = state.rates || { USD: 90, USDT: 90 };
+  const rubPerUnit = (c) => c === 'RUB' ? 1 : (rates[c] || 1);
+  // 1 fromCur = rubPerUnit(from) рублей = rubPerUnit(from)/rubPerUnit(to) единиц toCur
+  return rubPerUnit(fromCur) / rubPerUnit(toCur);
+}
+
+function updateConvertPreview() {
+  const fromSel = document.getElementById('conv-from');
+  const toSel = document.getElementById('conv-to');
+  const amtEl = document.getElementById('conv-amount');
+  const rateEl = document.getElementById('conv-rate');
+  const curLabel = document.getElementById('conv-from-cur');
+  const rateWrap = document.getElementById('conv-rate-wrap');
+  const rateHint = document.getElementById('conv-rate-hint');
+  const preview = document.getElementById('conv-preview');
+  if (!fromSel || !toSel || !amtEl || !rateEl) return;
+
+  const fromBal = state.balances.find(b => b.id === fromSel.value);
+  const toBal = state.balances.find(b => b.id === toSel.value);
+
+  if (curLabel) {
+    curLabel.textContent = fromBal ? `(в ${curSym(fromBal.currency)})` : '';
+  }
+
+  // Если валюты одинаковые — курс не нужен
+  const sameCur = fromBal && toBal && fromBal.currency === toBal.currency;
+  if (rateWrap) rateWrap.style.display = sameCur ? 'none' : '';
+
+  // Подставляем курс автоматически, если поле пустое или выбор валют поменялся
+  if (fromBal && toBal && !sameCur) {
+    const suggested = suggestedConvRate(fromBal.currency, toBal.currency);
+    // если у rateEl сохранён предыдущий контекст (какая пара был курс) — перезаполняем при смене
+    const ctx = `${fromBal.currency}->${toBal.currency}`;
+    if (!rateEl.value || rateEl.dataset.ctx !== ctx) {
+      rateEl.value = suggested ? suggested.toFixed(4).replace(/\.?0+$/, '') : '';
+      rateEl.dataset.ctx = ctx;
+    }
+    if (rateHint) {
+      rateHint.textContent = `Подсказка: по текущим курсам 1 ${curSym(fromBal.currency)} ≈ ${suggested.toFixed(4).replace(/\.?0+$/, '')} ${curSym(toBal.currency)}. Поменяй, если обменял по другому курсу.`;
+    }
+  }
+
+  // Превью
+  if (!preview) return;
+  const amt = parseAmount(amtEl.value);
+  if (!fromBal || !toBal) { preview.style.display = 'none'; return; }
+  if (fromBal.id === toBal.id) {
+    preview.style.display = 'block';
+    preview.innerHTML = '⚠️ Счёт-источник и счёт-получатель должны быть разными.';
+    return;
+  }
+  if (isNaN(amt) || amt <= 0) { preview.style.display = 'none'; return; }
+
+  const rate = sameCur ? 1 : parseAmount(rateEl.value);
+  if (!sameCur && (isNaN(rate) || rate <= 0)) {
+    preview.style.display = 'block';
+    preview.innerHTML = '⚠️ Укажи курс обмена.';
+    return;
+  }
+  const destAmt = Math.round(amt * rate * 100) / 100;
+  const warn = (amt > fromBal.amount)
+    ? `<div style="color:#ff9f4f;margin-top:6px">⚠️ На «${fromBal.name}» сейчас только ${fmtCur(fromBal.amount, fromBal.currency)} — перевод уйдёт в минус.</div>`
+    : '';
+  preview.style.display = 'block';
+  preview.innerHTML =
+    `📤 С «${fromBal.name}» снимаем ${fmtCur(amt, fromBal.currency)}<br>` +
+    `📥 На «${toBal.name}» зачисляем ${fmtCur(destAmt, toBal.currency)}` +
+    (sameCur ? '' : ` (курс ${rate.toFixed(4).replace(/\.?0+$/, '')})`) +
+    warn;
+}
+
+function convertBetweenBalances() {
+  try {
+    const fromSel = document.getElementById('conv-from');
+    const toSel = document.getElementById('conv-to');
+    const amtEl = document.getElementById('conv-amount');
+    const rateEl = document.getElementById('conv-rate');
+    const dateEl = document.getElementById('conv-date');
+    const fromBal = state.balances.find(b => b.id === fromSel.value);
+    const toBal = state.balances.find(b => b.id === toSel.value);
+    if (!fromBal) { alert('Выбери счёт-источник'); return; }
+    if (!toBal) { alert('Выбери счёт-получатель'); return; }
+    if (fromBal.id === toBal.id) { alert('Счёт-источник и счёт-получатель должны быть разными'); return; }
+
+    const amt = parseAmount(amtEl.value);
+    if (isNaN(amt) || amt <= 0) { alert('Укажи сумму больше 0'); return; }
+
+    const sameCur = fromBal.currency === toBal.currency;
+    const rate = sameCur ? 1 : parseAmount(rateEl.value);
+    if (!sameCur && (isNaN(rate) || rate <= 0)) { alert('Укажи курс обмена'); return; }
+
+    const destAmt = Math.round(amt * rate * 100) / 100;
+
+    if (amt > fromBal.amount) {
+      if (!confirm(`На «${fromBal.name}» только ${fmtCur(fromBal.amount, fromBal.currency)}, а списываем ${fmtCur(amt, fromBal.currency)}. Баланс уйдёт в минус. Продолжить?`)) return;
+    }
+
+    const date = (dateEl && dateEl.value) || todayIso();
+
+    // Применяем движение по балансам
+    fromBal.amount = Math.round((fromBal.amount - amt) * 100) / 100;
+    toBal.amount = Math.round((toBal.amount + destAmt) * 100) / 100;
+
+    // Записываем парные транзакции с категорией «🔄 Между своими» — в бюджет они не попадут,
+    // но останутся в истории
+    const pairId = safeId();
+    const amtRubFrom = toRub(amt, fromBal.currency);
+    const amtRubTo = toRub(destAmt, toBal.currency);
+    state.transactions.push({
+      id: safeId(),
+      date,
+      name: `Перевод: ${fromBal.name} → ${toBal.name}`,
+      amount: amtRubFrom,
+      nativeAmount: amt,
+      nativeCurrency: fromBal.currency,
+      cat: '🔄 Между своими',
+      type: 'expense',
+      balanceId: fromBal.id,
+      balanceDeducted: amt,
+      balanceCurrency: fromBal.currency,
+      transferPairId: pairId,
+      transferSide: 'out'
+    });
+    state.transactions.push({
+      id: safeId(),
+      date,
+      name: `Перевод: ${fromBal.name} → ${toBal.name}`,
+      amount: amtRubTo,
+      nativeAmount: destAmt,
+      nativeCurrency: toBal.currency,
+      cat: '🔄 Между своими',
+      type: 'income',
+      balanceId: toBal.id,
+      transferPairId: pairId,
+      transferSide: 'in',
+      convRate: sameCur ? null : rate
+    });
+
+    save();
+    // очищаем поля
+    amtEl.value = '';
+    if (rateEl) { rateEl.value = ''; delete rateEl.dataset.ctx; }
+    renderAll();
+    const rateText = sameCur ? '' : ` (курс ${rate.toFixed(4).replace(/\.?0+$/, '')})`;
+    toast(`🔄 ${fmtCur(amt, fromBal.currency)} → ${fmtCur(destAmt, toBal.currency)}${rateText}`, 'good');
+  } catch (e) {
+    console.error(e);
+    alert('Ошибка: ' + e.message);
+  }
 }
 
 function renderBalances() {
@@ -3032,7 +3469,7 @@ function toggleHabit(id) {
 
 // Проверка: «потяну ли я эту привычку» (cost за раз + freq)
 function habitAffordability(cost, freq) {
-  const monthlyFreeBeforeHabits = totalIncome() - totalExpenses() - totalCredits() - totalGoalsMonthly();
+  const monthlyFreeBeforeHabits = freeIncome() - uncoveredExpensesTotal() - totalCredits() - totalGoalsMonthly();
   const existingHabitsMonthly = totalHabitsMonthly();
   const remainingMonthly = monthlyFreeBeforeHabits - existingHabitsMonthly;
   const remainingDaily = remainingMonthly / 30;
@@ -3055,7 +3492,7 @@ function renderHabits() {
   if (!listEl || !cardEl) return;
 
   // Сводка «потяну ли я это всё»
-  const monthlyFreeBeforeHabits = totalIncome() - totalExpenses() - totalCredits() - totalGoalsMonthly();
+  const monthlyFreeBeforeHabits = freeIncome() - uncoveredExpensesTotal() - totalCredits() - totalGoalsMonthly();
   const habitsMonthly = totalHabitsMonthly();
   const habitsDaily = totalHabitsDaily();
   const leftover = monthlyFreeBeforeHabits - habitsMonthly;
@@ -3413,6 +3850,9 @@ function renderDashboard() {
     payPlan.innerHTML = '<div class="empty-state" style="padding:20px 0"><div class="empty-icon">📅</div>Добавь даты выплат, и здесь появится план по следующей зарплате.</div>';
   }
 
+  // Распределение по выплатам (5/20 и т.п.)
+  renderPaycheckSplit();
+
   // Upcoming 14 days
   renderUpcomingCalendar();
 
@@ -3491,11 +3931,168 @@ function renderDashboard() {
     : 'Добавь ежедневные траты, чтобы увидеть средний чек жизни и скорректировать привычки.';
 }
 
+// Разбиваем ближайшие выплаты и считаем какие списания (кредиты + запланированные расходы)
+// выпадают в окно между каждой парой соседних выплат. Горизонт — ~45 дней.
+function computePaycheckAllocations() {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const horizon = new Date(today); horizon.setDate(horizon.getDate() + 45);
+
+  const paychecks = [];
+  (state.incomes || []).forEach(inc => {
+    if (!['monthly', 'semimonthly', 'yearly'].includes(inc.freq)) return;
+    for (let mi = -1; mi <= 2; mi++) {
+      const mDate = new Date(today.getFullYear(), today.getMonth() + mi, 1);
+      const y = mDate.getFullYear(), m = mDate.getMonth();
+      (inc.payDays || []).forEach(d => {
+        const day = clampDayToMonth(d, y, m);
+        const pd = new Date(y, m, day);
+        pd.setHours(0, 0, 0, 0);
+        if (pd < today || pd > horizon) return;
+        // Если уже подтверждено как полученное — пропускаем
+        const iso = `${y}-${String(m+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+        if (Array.isArray(inc.paidLog) && inc.paidLog.includes(iso)) {
+          // Всё равно нужно учесть, но пометим как received
+          paychecks.push({ dateObj: pd, iso, incomeId: inc.id, incomeName: inc.name, amount: toRub(inc.amount || 0, inc.currency || 'RUB'), currency: inc.currency || 'RUB', received: true });
+          return;
+        }
+        paychecks.push({ dateObj: pd, iso, incomeId: inc.id, incomeName: inc.name, amount: toRub(inc.amount || 0, inc.currency || 'RUB'), currency: inc.currency || 'RUB', received: false });
+      });
+    }
+  });
+  paychecks.sort((a, b) => a.dateObj - b.dateObj);
+  if (paychecks.length === 0) return [];
+
+  const allocations = [];
+  for (let i = 0; i < paychecks.length; i++) {
+    const pc = paychecks[i];
+    if (pc.received) continue; // уже полученные в прошлом — пропускаем в плане
+    const next = paychecks.slice(i + 1).find(p => !p.received) || paychecks[i + 1];
+    const from = pc.dateObj;
+    const to = next
+      ? new Date(next.dateObj.getTime() - 1)
+      : new Date(from.getTime() + 30 * 24 * 3600 * 1000);
+
+    const outflows = [];
+    // Кредиты в окне
+    (state.credits || []).forEach(cr => {
+      const dates = creditChargeDatesInRange(cr, from, to);
+      dates.forEach(d => outflows.push({
+        kind: 'credit', name: cr.name, amount: cr.monthly || 0, date: d, payDay: d.getDate(),
+        hasBalance: !!cr.balanceId
+      }));
+    });
+    // Запланированные расходы с payDay, покрываются только необеспеченная часть (за вычетом BitZone и т.п.)
+    (state.expenses || []).forEach(e => {
+      if (!e.payDay) return;
+      let cur = new Date(from.getFullYear(), from.getMonth(), 1);
+      const end = new Date(to.getFullYear(), to.getMonth(), 1);
+      while (cur <= end) {
+        const dday = clampDayToMonth(e.payDay, cur.getFullYear(), cur.getMonth());
+        const ed = new Date(cur.getFullYear(), cur.getMonth(), dday);
+        if (ed >= from && ed <= to && !isExpenseFinishedForDate(e, ed)) {
+          const cov = earmarkedCoverage(e.id);
+          const uncovered = Math.max(0, (e.amount || 0) - cov);
+          if (uncovered > 0) {
+            outflows.push({
+              kind: 'expense', name: e.name, amount: uncovered, date: ed, payDay: dday,
+              hasBalance: !!e.balanceId,
+              coverage: cov > 0 ? cov : 0,
+              fullAmount: e.amount || 0
+            });
+          }
+        }
+        cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+      }
+    });
+
+    outflows.sort((a, b) => a.date - b.date);
+    const total = outflows.reduce((s, o) => s + o.amount, 0);
+    allocations.push({ paycheck: pc, outflows, total, nextPaycheck: next || null });
+    if (allocations.length >= 2) break; // две ближайшие выплаты
+  }
+  return allocations;
+}
+
+function renderPaycheckSplit() {
+  const wrap = document.getElementById('dash-paycheck-split');
+  if (!wrap) return;
+  const allocs = computePaycheckAllocations();
+  if (!allocs.length) {
+    wrap.innerHTML = '<div class="empty-state" style="padding:16px 0"><div class="empty-icon">📅</div>Чтобы увидеть разбивку — добавь доход с датами выплат и расходы/кредиты с днём списания.</div>';
+    return;
+  }
+
+  let html = `<div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:12px">
+    Каждая выплата покрывает списания, попадающие в окно до следующей зарплаты. Ниже — что именно отложить с каждой.
+  </div>`;
+
+  allocs.forEach(a => {
+    const pc = a.paycheck;
+    const pcDate = pc.dateObj.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+    const weekDay = pc.dateObj.toLocaleDateString('ru-RU', { weekday: 'short' });
+    const toDate = a.nextPaycheck ? a.nextPaycheck.dateObj.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) : '+30 дн';
+    const coverPct = pc.amount > 0 ? Math.round((a.total / pc.amount) * 100) : 0;
+    const leftover = Math.max(0, pc.amount - a.total);
+    const over = Math.max(0, a.total - pc.amount);
+
+    let outflowsHtml = '';
+    if (a.outflows.length === 0) {
+      outflowsHtml = '<div style="font-size:12px;color:var(--muted);padding:8px 0">В это окно ничего не списывается — все можно пустить на цели / дневной бюджет.</div>';
+    } else {
+      outflowsHtml = a.outflows.map(o => {
+        const dLabel = o.date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+        const icon = o.kind === 'credit' ? '🏦' : '📅';
+        const color = o.kind === 'credit' ? 'var(--accent2)' : '#ff9f4f';
+        const covNote = (o.kind === 'expense' && o.coverage > 0)
+          ? `<div style="font-size:10px;color:var(--muted)">из ${fmt(o.fullAmount)} покрыто ${fmt(o.coverage)} зарезервированным доходом</div>`
+          : '';
+        const balNote = o.hasBalance
+          ? '<span style="font-size:10px;color:var(--accent)">·авто</span>'
+          : '<span style="font-size:10px;color:#ff9f4f" title="Не привязан к балансу">·вручную</span>';
+        return `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--border);gap:8px">
+          <div style="min-width:0;flex:1">
+            <div style="font-size:13px">${icon} ${o.name} ${balNote}</div>
+            <div style="font-size:11px;color:var(--muted)">${dLabel} (${o.payDay} числа)</div>
+            ${covNote}
+          </div>
+          <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:700;color:${color};flex-shrink:0">−${fmt(o.amount)}</div>
+        </div>`;
+      }).join('');
+    }
+
+    const statusAlert = over > 0
+      ? `<div class="alert danger" style="margin:10px 0 0">⛔ Не хватает <strong>${fmt(over)}</strong>. Часть платежей придётся перенести на другую выплату или добавить доход.</div>`
+      : `<div style="font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5">После обязательных останется <strong style="color:var(--accent)">${fmt(leftover)}</strong> на жизнь и цели.</div>`;
+
+    const curSym = pc.currency === 'USDT' ? '₮' : (pc.currency === 'USD' ? '$' : '₽');
+    html += `<div class="card" style="margin-bottom:12px;padding:14px;border-left:3px solid var(--accent)">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+        <div>
+          <div style="font-size:14px;font-weight:700">💰 ${pc.incomeName}</div>
+          <div style="font-size:11px;color:var(--muted)">${pcDate} · ${weekDay} → окно до ${toDate}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:var(--accent)">+${fmt(pc.amount)}</div>
+          <div style="font-size:11px;color:var(--muted)">${pc.currency !== 'RUB' ? '≈ ' : ''}в ₽</div>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Отложить сразу: <strong style="color:${coverPct > 100 ? 'var(--accent2)' : (coverPct > 70 ? '#ff9f4f' : 'var(--accent)')}">${fmt(a.total)}</strong> (${coverPct}% выплаты)</div>
+      <div class="progress-wrap" style="margin-bottom:10px"><div class="progress-bar" style="width:${Math.min(100, coverPct)}%;background:${coverPct > 100 ? 'var(--accent2)' : (coverPct > 70 ? '#ff9f4f' : 'var(--accent)')}"></div></div>
+      ${outflowsHtml}
+      ${statusAlert}
+    </div>`;
+  });
+
+  wrap.innerHTML = html;
+}
+
 function renderUpcomingCalendar() {
   const wrap = document.getElementById('dash-upcoming');
   if (!wrap) return;
   const events = upcomingEvents(14);
-  if (!events.length) {
+  const avgDaily = averageDailyLifeSpend();
+
+  if (!events.length && avgDaily <= 0) {
     wrap.innerHTML = '<div class="empty-state" style="padding:20px 0"><div class="empty-icon">🗓</div>Нет запланированных поступлений и списаний на 14 дней.<br><span style="font-size:12px;color:var(--muted)">Укажи даты выплат у доходов и «день списания» у обязательных расходов и кредитов.</span></div>';
     return;
   }
@@ -3505,7 +4102,7 @@ function renderUpcomingCalendar() {
   // Посчитаем running balance
   const startBal = (state.balances || []).reduce((s, b) => s + toRub(b.amount, b.currency), 0);
 
-  // Группируем по дате
+  // Группируем события по дате
   const byDay = {};
   events.forEach(ev => {
     if (!byDay[ev.date]) byDay[ev.date] = { dateObj: ev.dateObj, items: [], income: 0, expense: 0 };
@@ -3514,19 +4111,33 @@ function renderUpcomingCalendar() {
     else byDay[ev.date].expense += ev.amount;
   });
 
-  const dates = Object.keys(byDay).sort();
+  // Построим 14 дней (сегодня..+13), добавляя средний чек жизни на каждый день
+  const allDays = [];
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    allDays.push({ key, dateObj: d, day: byDay[key] || { dateObj: d, items: [], income: 0, expense: 0 } });
+  }
+
   let running = startBal;
-  let totalIn = 0, totalOut = 0;
+  let totalIn = 0, totalOut = 0, totalLife = 0;
   let html = '';
-  dates.forEach(dateKey => {
-    const day = byDay[dateKey];
-    const dayLabel = formatShortDate(day.dateObj);
-    const weekDay = day.dateObj.toLocaleDateString('ru-RU', { weekday: 'short' });
-    running += day.income - day.expense;
+  allDays.forEach(({ key, dateObj, day }) => {
+    const dayLabel = formatShortDate(dateObj);
+    const weekDay = dateObj.toLocaleDateString('ru-RU', { weekday: 'short' });
+    const lifeSpend = avgDaily > 0 ? avgDaily : 0;
+    running += day.income - day.expense - lifeSpend;
     totalIn += day.income;
     totalOut += day.expense;
+    totalLife += lifeSpend;
 
-    html += `<div style="border-left:3px solid ${day.income > day.expense ? 'var(--accent)' : 'var(--accent2)'};padding:10px 12px;margin-bottom:10px;background:var(--bg2);border-radius:8px">
+    // Пропускаем пустые дни (только «средний чек жизни», без событий), чтобы не замусорить календарь.
+    // Но если день один из крайних (сегодня) или значимых (остаток близко к 0) — можно показать.
+    if (day.items.length === 0) return;
+
+    const leftColor = day.income > day.expense + lifeSpend ? 'var(--accent)' : 'var(--accent2)';
+    html += `<div style="border-left:3px solid ${leftColor};padding:10px 12px;margin-bottom:10px;background:var(--bg2);border-radius:8px">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
         <div style="font-size:13px;font-weight:600">${dayLabel} <span style="color:var(--muted);font-weight:400">· ${weekDay}</span></div>
         <div style="font-size:11px;color:var(--muted)">остаток ≈ ${fmt(running)}</div>
@@ -3539,19 +4150,41 @@ function renderUpcomingCalendar() {
         <span style="color:${color};font-weight:600">${sign}${fmt(ev.amount)}</span>
       </div>`;
     });
+    if (lifeSpend > 0) {
+      html += `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:var(--muted);border-top:1px dashed var(--border);margin-top:4px;padding-top:6px">
+        <span>🍔 Средний чек жизни</span>
+        <span>−${fmt(lifeSpend)}</span>
+      </div>`;
+    }
     html += `</div>`;
   });
 
-  const net = totalIn - totalOut;
+  const net = totalIn - totalOut - totalLife;
   const netColor = net >= 0 ? 'var(--accent)' : 'var(--accent2)';
-  html = `<div class="grid-3" style="margin-bottom:14px">
+
+  // Шапка: 4 колонки с новой «Чек жизни за 14 дн»
+  const lifeHeader = avgDaily > 0
+    ? `<div style="padding:10px 12px;background:#141823;border-radius:10px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);line-height:1.4">
+        <span>🍔 <strong style="color:#e8ecf4">Средний чек жизни</strong><br>
+          <span style="font-size:11px">по истории ${(state.transactions || []).filter(t => t.type === 'expense').length} операций</span></span>
+        <span style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700;color:#ff9f4f">−${fmt(avgDaily)}<span style="font-size:11px;color:var(--muted);font-weight:400">/день</span></span>
+      </div>`
+    : `<div style="padding:10px 12px;background:#141823;border-radius:10px;margin-bottom:14px;font-size:11px;color:var(--muted);line-height:1.5">
+        🍔 <strong style="color:#e8ecf4">Средний чек жизни:</strong> пока не рассчитан — добавь ежедневные траты или импортируй историю из выписки, чтобы план 14 дней учитывал фактические расходы.
+      </div>`;
+
+  html = `<div class="grid-3" style="margin-bottom:10px">
     <div><div style="font-size:11px;color:var(--muted)">Поступит</div>
       <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700;color:var(--accent)">${fmt(totalIn)}</div></div>
-    <div><div style="font-size:11px;color:var(--muted)">Спишется</div>
+    <div><div style="font-size:11px;color:var(--muted)">Плановые списания</div>
       <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700;color:var(--accent2)">${fmt(totalOut)}</div></div>
     <div><div style="font-size:11px;color:var(--muted)">Итого за 14 дн</div>
       <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700;color:${netColor}">${net >= 0 ? '+' : ''}${fmt(net)}</div></div>
-  </div>` + html;
+  </div>` + lifeHeader + html;
+
+  if (!events.length) {
+    html += '<div class="item-sub" style="padding:14px;text-align:center;color:var(--muted)">Плановых событий на 14 дней нет — отображаем только средний чек жизни.</div>';
+  }
 
   wrap.innerHTML = html;
 }
@@ -3597,6 +4230,8 @@ function renderIncome() {
     const freqNote = freq === 'monthly' && curr === 'RUB' ? '' : ` · ≈ ${fmt(mthEq)}/мес`;
     const bal = i.balanceId ? (state.balances || []).find(b => b.id === i.balanceId) : null;
     const balNote = bal ? ` · 💳 ${bal.name}` : '';
+    const earExp = i.earmarkedFor ? (state.expenses || []).find(e => e.id === i.earmarkedFor) : null;
+    const earNote = earExp ? ` · 🔒 на «${earExp.name}»` : '';
     // Ежедневный доход — показываем кнопку «зафиксировать сегодня»
     const loggedTodayRub = freq === 'daily'
       ? state.transactions
@@ -3669,7 +4304,7 @@ function renderIncome() {
           <div class="item-icon" style="background:#0f2d1f">💰</div>
           <div class="two-row">
             <div class="item-name">${i.name}</div>
-            <div class="item-sub">${typeLabel[i.type]} · ${FREQ_LABEL[freq]}${currNote}${freqNote}${payDaysText(i)}${balNote}</div>
+            <div class="item-sub">${typeLabel[i.type]} · ${FREQ_LABEL[freq]}${currNote}${freqNote}${payDaysText(i)}${balNote}${earNote}</div>
           </div>
         </div>
         <div style="display:flex;align-items:center">
@@ -3747,6 +4382,21 @@ function renderExpenses() {
           // Легаси разовое списание
           statusLine = `<div style="font-size:11px;color:var(--muted);margin-top:4px">💳 Разово списано ${fmtCur(e.balanceDeducted, e.balanceCurrency || 'RUB')}</div>`;
         }
+        // Покрытие от зарезервированных доходов (напр. BitZone → Квартира)
+        let coverageLine = '';
+        const cov = earmarkedCoverage(e.id);
+        if (cov > 0) {
+          const sources = (state.incomes || [])
+            .filter(inc => inc.earmarkedFor === e.id)
+            .map(inc => inc.name)
+            .join(', ');
+          const pct = Math.min(100, Math.round((cov / Math.max(1, e.amount)) * 100));
+          const fully = cov >= e.amount;
+          coverageLine = `<div style="margin-top:6px;padding:8px 10px;background:#0f2d1f;border-radius:8px;border-left:3px solid var(--accent)">
+            <div style="font-size:11px;color:var(--accent);font-weight:700;margin-bottom:2px">🔒 Покрывается: ${sources}</div>
+            <div style="font-size:11px;color:var(--muted)">${fmt(cov)}/мес из ${fmt(e.amount)} (${pct}%)${fully ? ' · 💰 с излишком копится на этот расход' : ` · нужно докинуть ${fmt(e.amount - cov)}`}</div>
+          </div>`;
+        }
         const finished = isExpenseFinished(e);
         html += `
           <div class="item-row" style="${finished ? 'opacity:.5' : ''}">
@@ -3755,6 +4405,7 @@ function renderExpenses() {
                 <div class="item-name">${e.name}${finished ? ' · ✅ закрыт' : ''}</div>
                 <div class="item-sub">${sub}</div>
                 ${statusLine}
+                ${coverageLine}
               </div>
             </div>
             <div style="display:flex;align-items:center">
@@ -3834,6 +4485,11 @@ function renderCredits() {
     if (freq === 'monthly' && c.payDay) metaBits.push(`🗓 ${c.payDay} числа`);
     if (freq === 'semimonthly' && Array.isArray(c.payDays) && c.payDays.length === 2) metaBits.push(`🗓 ${c.payDays[0]} и ${c.payDays[1]} числа`);
     if ((freq === 'biweekly' || freq === 'weekly') && c.anchorDate) metaBits.push(`🗓 от ${c.anchorDate}`);
+    // Источник списания
+    if (c.balanceId) {
+      const srcBal = state.balances.find(b => b.id === c.balanceId);
+      if (srcBal) metaBits.push(`💳 с «${srcBal.name}»`);
+    }
     // Срок — показываем в тех единицах, в которых был задан
     if (c.term > 0) {
       const unitLbl = c.termUnit === 'weeks' ? (c.term === 1 ? 'неделя' : (c.term < 5 ? 'недели' : 'недель')) : (c.term === 1 ? 'месяц' : (c.term < 5 ? 'месяца' : 'месяцев'));
@@ -3860,6 +4516,9 @@ function renderCredits() {
       </div>
       ${monthsLeft > 0 ? `<div style="font-size:13px;color:var(--muted)">Осталось ~${monthsLeft} месяцев${c.termUnit === 'weeks' ? ` (≈ ${Math.ceil(monthsLeft * 30.44 / 7)} недель)` : ''}</div>
       <div class="progress-wrap"><div class="progress-bar blue" style="width:${Math.min(100,paidPct)}%"></div></div>` : ''}
+      <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn btn-primary" style="flex:1;min-width:140px;font-size:12px;padding:10px" onclick="payCreditNow('${c.id}')">💸 Внести платёж</button>
+      </div>
     </div>`;
   });
   list.innerHTML = html;
@@ -4639,6 +5298,8 @@ function renderImportPreview(rows, byCat, sortedCats, totalInc) {
   }
   html += `<button class="btn btn-primary" onclick="applyImportAsMonthly()">✓ Применить СРЕДНИЕ (${fmt(selectedExpPerMonth)}/мес)</button>
     <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">Добавятся средние месячные расходы по выбранным категориям. Это реалистично отразит твой ежемесячный бюджет.</div>
+    <button class="btn btn-primary" style="margin-top:12px;background:#2a4a6f" onclick="applyImportAsHistory()">📜 Импортировать всю ИСТОРИЮ (${rows.length} операций)</button>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">Каждая операция выписки попадёт в «Ежедневные траты» с её реальной датой — появится память за прошлые месяцы. Полезно для подсчёта «среднего чека жизни» и графиков. Дубликаты пропускаются автоматически.</div>
     <button class="btn btn-ghost" style="margin-top:12px" onclick="cancelImport()">✕ Закрыть без изменений</button>
     </div>`;
 
@@ -4732,6 +5393,60 @@ function applyImportAsMonthly() {
   showPageDirect('dashboard');
 }
 
+// Импорт как ИСТОРИЯ: каждая операция попадает в state.transactions с реальной датой.
+// Даёт приложению «память» о прошлых тратах для среднего чека, графиков, ретроспективы.
+function applyImportAsHistory() {
+  if (!importBuffer || importBuffer.length === 0) return;
+  if (!confirm(`Импортировать все ${importBuffer.length} операций в историю транзакций?\n\nДубликаты (уже добавленные с тем же описанием/датой/суммой) пропустятся.`)) return;
+
+  // Существующие ключи для дедупа
+  const seen = new Set();
+  (state.transactions || []).forEach(t => {
+    seen.add(`${t.date}|${(t.name || '').trim().toLowerCase()}|${Math.round((t.amount || 0) * 100)}|${t.type || 'expense'}`);
+  });
+
+  let addedExp = 0, addedInc = 0, skipped = 0, skippedTransfers = 0;
+
+  importBuffer.forEach(r => {
+    // Пропускаем «между своими» если пользователь снял категорию
+    if (r.type === 'expense' && r.cat === '🔄 Между своими' && importSelected['🔄 Между своими'] === false) {
+      skippedTransfers++;
+      return;
+    }
+    // Пропускаем доходы, если пользователь не включил их
+    if (r.type === 'income' && importInclInc === false) {
+      return;
+    }
+    const name = (r.desc || '').trim();
+    const key = `${r.date}|${name.toLowerCase()}|${Math.round((r.amount || 0) * 100)}|${r.type}`;
+    if (seen.has(key)) { skipped++; return; }
+    seen.add(key);
+
+    state.transactions.push({
+      id: safeId(),
+      date: r.date,
+      name: name || (r.type === 'income' ? 'Поступление' : 'Операция'),
+      amount: r.amount,
+      cat: r.cat || (r.type === 'income' ? '💰 Доход' : autoCategorize(name)),
+      type: r.type || 'expense'
+    });
+    if (r.type === 'income') addedInc++;
+    else addedExp++;
+  });
+
+  save();
+  const parts = [];
+  if (addedExp) parts.push(`${addedExp} трат`);
+  if (addedInc) parts.push(`${addedInc} поступлений`);
+  if (skipped) parts.push(`${skipped} пропущено (дубли)`);
+  if (skippedTransfers) parts.push(`${skippedTransfers} переводов между своими скрыто`);
+  alert(`История импортирована!\n\n${parts.join('\n')}`);
+  importBuffer = [];
+  importSelected = {};
+  document.getElementById('import-preview').innerHTML = '';
+  showPageDirect('dashboard');
+}
+
 function showPageDirect(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -4757,7 +5472,9 @@ function renderAll() {
   renderTips();
   refreshExpenseBalanceSelect();
   refreshIncomeBalanceSelect();
+  refreshIncomeEarmarkSelect();
   refreshTransactionBalanceSelect();
+  refreshCreditBalanceSelect();
   updateIncomeScheduleFields();
   updateCreditScheduleFields();
   if (typeof renderV2 === 'function') renderV2();
@@ -5537,7 +6254,8 @@ function showPendingDeductionsPrompt() { return showPendingEventsPrompt(); }
 function showPendingEventsPrompt() {
   const pendingIncomes = (typeof findPendingIncomes === 'function') ? findPendingIncomes() : [];
   const pendingDeductions = findPendingDeductions();
-  if (!pendingIncomes.length && !pendingDeductions.length) return;
+  const pendingCredits = (typeof findPendingCreditDeductions === 'function') ? findPendingCreditDeductions() : [];
+  if (!pendingIncomes.length && !pendingDeductions.length && !pendingCredits.length) return;
 
   const host = document.getElementById('pending-events-modal') || (() => {
     const d = document.createElement('div');
@@ -5547,7 +6265,8 @@ function showPendingEventsPrompt() {
     return d;
   })();
 
-  const title = pendingIncomes.length && pendingDeductions.length
+  const anyOut = pendingDeductions.length || pendingCredits.length;
+  const title = pendingIncomes.length && anyOut
     ? '🔔 Есть ожидаемые доходы и списания'
     : (pendingIncomes.length ? '💰 Есть ожидаемые поступления' : '🔔 Есть плановые списания');
 
@@ -5559,6 +6278,7 @@ function showPendingEventsPrompt() {
       </div>
       <div id="pending-incomes-section"></div>
       <div id="pending-deductions-section" style="margin-top:${pendingIncomes.length ? '14px' : '0'}"></div>
+      <div id="pending-credits-section" style="margin-top:${(pendingIncomes.length || pendingDeductions.length) ? '14px' : '0'}"></div>
       <div style="display:flex;gap:8px;margin-top:12px">
         <button class="btn btn-ghost" style="flex:1" onclick="closePendingEventsPrompt()">Разобраться позже</button>
       </div>
@@ -5569,12 +6289,14 @@ function showPendingEventsPrompt() {
 function renderPendingEventsLists() {
   const incHost = document.getElementById('pending-incomes-section');
   const dedHost = document.getElementById('pending-deductions-section');
-  if (!incHost && !dedHost) return;
+  const crHost = document.getElementById('pending-credits-section');
+  if (!incHost && !dedHost && !crHost) return;
 
   const pendingIncomes = (typeof findPendingIncomes === 'function') ? findPendingIncomes() : [];
   const pendingDeductions = findPendingDeductions();
+  const pendingCredits = (typeof findPendingCreditDeductions === 'function') ? findPendingCreditDeductions() : [];
 
-  if (!pendingIncomes.length && !pendingDeductions.length) {
+  if (!pendingIncomes.length && !pendingDeductions.length && !pendingCredits.length) {
     closePendingEventsPrompt();
     return;
   }
@@ -5642,6 +6364,34 @@ function renderPendingEventsLists() {
         }).join('')}`;
     }
   }
+
+  if (crHost) {
+    if (!pendingCredits.length) {
+      crHost.innerHTML = '';
+    } else {
+      crHost.innerHTML = `
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.6px;color:var(--accent2);margin-bottom:8px;font-weight:700">🏦 Плановые списания по кредитам</div>
+        ${pendingCredits.map(p => {
+          const when = p.overdueDays === 0
+            ? `Сегодня (${p.payDay} число) — день платежа`
+            : `Просрочено на ${p.overdueDays} ${p.overdueDays === 1 ? 'день' : (p.overdueDays < 5 ? 'дня' : 'дней')} (должно было ${p.payDay} числа)`;
+          return `
+            <div class="card" style="margin-bottom:10px;padding:14px;border-left:3px solid var(--accent2)">
+              <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:700;margin-bottom:4px">🏦 ${p.name}</div>
+              <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${when}</div>
+              <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
+                <div style="font-size:12px;color:var(--muted)">Счёт: ${p.balanceName}</div>
+                <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700">${fmtCur(p.amount, p.currency)}</div>
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="btn btn-primary" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="confirmCreditDeduction('${p.crId}','${p.chargeKey}')">✅ Списать с баланса</button>
+                <button class="btn btn-ghost" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="markCreditPaidExt('${p.crId}','${p.chargeKey}')">💳 Уже оплатил сам</button>
+                <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px;color:var(--accent2)" onclick="skipCreditCharge('${p.crId}','${p.chargeKey}')">⏭ Пропустить</button>
+              </div>
+            </div>`;
+        }).join('')}`;
+    }
+  }
 }
 
 // Deductions handlers
@@ -5662,6 +6412,29 @@ function markPaidExternal(expId, monthKey) {
 function skipDeductionMonth(expId, monthKey) {
   if (markDeductionSkipped(expId, monthKey)) {
     toast('Месяц пропущен', 'warn');
+    renderAll();
+    renderPendingEventsLists();
+  }
+}
+
+// Credit pending handlers
+function confirmCreditDeduction(crId, chargeKey) {
+  if (applyCreditDeduction(crId, chargeKey)) {
+    toast('Кредит списан с баланса', 'good');
+    renderAll();
+    renderPendingEventsLists();
+  }
+}
+function markCreditPaidExt(crId, chargeKey) {
+  if (markCreditPaidExternally(crId, chargeKey)) {
+    toast('Отмечено как оплачено', 'good');
+    renderAll();
+    renderPendingEventsLists();
+  }
+}
+function skipCreditCharge(crId, chargeKey) {
+  if (markCreditSkipped(crId, chargeKey)) {
+    toast('Платёж пропущен', 'warn');
     renderAll();
     renderPendingEventsLists();
   }
