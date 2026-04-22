@@ -1066,10 +1066,12 @@
       </div>
     </div>
     <div class="form-group">
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
-        <input id="exp-bad" type="checkbox" style="width:18px;height:18px;accent-color:#ff5a5a">
-        <span>🚫 Плохой расход — подписка / регулярка, которую хочется закрыть</span>
-      </label>
+      <input id="exp-bad" type="checkbox" style="display:none">
+      <button type="button" id="exp-bad-row" onclick="toggleExpBadRow()"
+        style="width:100%;display:flex;align-items:center;gap:10px;cursor:pointer;padding:14px;border:1px solid var(--border);border-radius:10px;background:#1a1420;transition:all 0.15s;color:#ff9aa8;font-family:inherit;font-size:14px;font-weight:600;text-align:left">
+        <span id="exp-bad-icon" style="font-size:18px">⚪</span>
+        <span>🚫 Плохой расход — регулярка, которую хочется закрыть</span>
+      </button>
       <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
         Бар по пятницам, ненужная подписка, дорогая доставка еды — то, что «утекает» регулярно. В «Плохих тратах месяца» будет виден реальный масштаб.
       </div>
@@ -1130,11 +1132,14 @@
         <button type="button" class="bad-chip" onclick="applyBadChip('🎰 Ставки/казино','🎮 Развлечения')">🎰 Ставки</button>
         <button type="button" class="bad-chip" onclick="applyBadChip('🍸 Бар/клуб','🎮 Развлечения')">🍸 Бар</button>
       </div>
-      <label id="tx-bad-row" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:#1a1420;transition:all 0.15s">
-        <input id="tx-bad" type="checkbox" style="width:20px;height:20px;accent-color:#ff5a5a" onchange="syncTxBadRow()">
-        <span style="font-weight:600">🚫 Плохая трата</span>
-        <span style="font-size:11px;color:var(--muted);margin-left:auto">учтётся в «🚫 Плохие траты»</span>
-      </label>
+      <!-- скрытый чекбокс для совместимости со старым кодом -->
+      <input id="tx-bad" type="checkbox" style="display:none">
+      <button type="button" id="tx-bad-row" onclick="toggleTxBadRow()"
+        style="width:100%;display:flex;align-items:center;gap:10px;cursor:pointer;padding:14px;border:1px solid var(--border);border-radius:10px;background:#1a1420;transition:all 0.15s;color:#ff9aa8;font-family:inherit;font-size:14px;font-weight:600;text-align:left">
+        <span id="tx-bad-icon" style="font-size:18px">⚪</span>
+        <span>🚫 Плохая трата</span>
+        <span style="font-size:11px;color:var(--muted);margin-left:auto;font-weight:400">учтётся в «🚫 Плохие траты»</span>
+      </button>
       <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
         Алкоголь, наркотики, сигареты, кальян, фастфуд, импульсивный шоппинг — всё, от чего хочется избавиться. В конце месяца увидишь, сколько на это ушло, и поймёшь масштаб.
       </div>
@@ -1543,6 +1548,22 @@
   <div class="form-group">
     <label>Описание (не обязательно)</label>
     <input id="quick-name" type="text" placeholder="Кофе, продукты…">
+  </div>
+  <div class="form-group">
+    <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;display:block">🚫 Плохая трата?</label>
+    <div id="quick-bad-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+      <button type="button" class="bad-chip" onclick="applyQuickBadChip('🍺 Алкоголь','🎮 Развлечения')">🍺 Алкоголь</button>
+      <button type="button" class="bad-chip" onclick="applyQuickBadChip('🚬 Сигареты','💊 Здоровье')">🚬 Сигареты</button>
+      <button type="button" class="bad-chip" onclick="applyQuickBadChip('💨 Вейп/кальян','💊 Здоровье')">💨 Вейп</button>
+      <button type="button" class="bad-chip" onclick="applyQuickBadChip('🍔 Фастфуд','🍔 Еда')">🍔 Фастфуд</button>
+      <button type="button" class="bad-chip" onclick="applyQuickBadChip('🍫 Сладкое','🍔 Еда')">🍫 Сладкое</button>
+      <button type="button" class="bad-chip" onclick="applyQuickBadChip('🍸 Бар','🎮 Развлечения')">🍸 Бар</button>
+    </div>
+    <button type="button" id="quick-bad-toggle" onclick="toggleQuickBad()"
+      style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--border);background:#1a1420;color:#ff9aa8;font-family:inherit;font-size:14px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all 0.15s">
+      <span id="quick-bad-icon">⚪</span>
+      <span id="quick-bad-label">Отметить как «плохую»</span>
+    </button>
   </div>
   <div style="display:flex;gap:8px;margin-top:6px">
     <button class="btn btn-ghost" onclick="closeQuickSheet()" style="flex:1">Отмена</button>
@@ -2168,6 +2189,13 @@ function getCashflowSnapshot() {
   const stableNextMonthEvents = nextMonthEvents.filter(isStablePay);
   const nextEventThisMonth = stableMonthEvents.find(e => e.date > todayIso()) || null;
   const nextEvent = nextEventThisMonth || stableNextMonthEvents[0] || null;
+  // На одну и ту же дату может попадать несколько доходов (у тебя Bulldrop ₽ + Bulldrop USDT,
+  // оба 5 и 20 числа). Суммируем все стабильные выплаты на дату nextEvent.
+  const sameDayStable = nextEvent
+    ? [...stableMonthEvents, ...stableNextMonthEvents].filter(e => e.date === nextEvent.date)
+    : [];
+  const sameDayAmount = sameDayStable.reduce((s, e) => s + e.amount, 0);
+  const sameDayNames = sameDayStable.map(e => e.incomeName).filter(Boolean);
 
   const receivedIncome = receivedEvents.reduce((s, e) => s + e.amount, 0);
   const actualDailyNet = totalTransactionExpenses() - totalTransactionIncome();
@@ -2200,9 +2228,13 @@ function getCashflowSnapshot() {
   let scheduledDebits = 0;
 
   if (nextEvent) {
-    nextPayAmount = nextEvent.amount;
+    // Суммарная выплата за день — если 5-го платят Bulldrop₽ + Bulldrop USDT сразу, дашборд
+    // и план должны видеть их как одну общую «выплату 5 мая», а не как 30 000 ₽ от первой записи.
+    nextPayAmount = sameDayAmount > 0 ? sameDayAmount : nextEvent.amount;
     nextPayDate = nextEvent.dateObj;
-    nextPayName = nextEvent.incomeName || 'Следующая выплата';
+    // Уникальные имена через «+»: Bulldrop + Bulldrop → Bulldrop; Salary + Bonus → Salary + Bonus.
+    const uniqueNames = [...new Set(sameDayNames)];
+    nextPayName = uniqueNames.length ? uniqueNames.join(' + ') : (nextEvent.incomeName || 'Следующая выплата');
     budgetDays = Math.max(1, Math.ceil((nextEvent.dateObj - today) / (1000 * 60 * 60 * 24)));
     // Датированные списания, которые произойдут от сегодня до дня до ЗП
     const dayBeforePay = new Date(nextEvent.dateObj);
@@ -2473,31 +2505,97 @@ function logIncomeForToday(incomeId) {
     if (!confirm(`За сегодня уже зафиксировано ${fmt(already.amount)} по «${inc.name}». Добавить ещё одну запись?`)) return;
   }
 
+  pushDailyIncomeTx(inc, today, amtNative, amtRub, curr);
+  save();
+  renderAll();
+  const nativeText = curr === 'RUB' ? fmt(amtNative) : `${amtNative} ${symbol}`;
+  toast(`+ ${nativeText} · ${inc.name}`, 'good');
+
+  // Если есть пропущенные дни — предложим догнать.
+  const missed = findMissedDaysForIncome(inc, today);
+  if (missed.length > 0) {
+    setTimeout(() => offerCatchUpMissedDays(inc.id), 150);
+  }
+}
+
+// Общий pusher: транзакция + пополнение баланса. Используется и за сегодня, и для догона.
+function pushDailyIncomeTx(inc, dateIso, amtNative, amtRub, curr) {
   state.transactions.push({
     id: safeId(),
-    date: today,
+    date: dateIso,
     name: inc.name,
-    amount: amtRub,           // для бюджета — всегда в ₽
-    nativeAmount: amtNative,  // исходная сумма (для отображения)
+    amount: amtRub,
+    nativeAmount: amtNative,
     nativeCurrency: curr,
     cat: '💰 Доход',
     type: 'income',
     incomeId: inc.id,
     balanceId: inc.balanceId || null
   });
-  // Пополняем баланс, если привязан: в валюте баланса
   if (inc.balanceId) {
     const bal = (state.balances || []).find(b => b.id === inc.balanceId);
     if (bal) {
-      // Если валюты совпадают — без конвертации, иначе через рубли
       const add = (bal.currency === curr) ? amtNative : fromRub(amtRub, bal.currency);
       bal.amount = Math.round((bal.amount + add) * 100) / 100;
     }
   }
+}
+
+// Находит пропущенные дни для daily-дохода: между первой транзакцией (или датой создания) и сегодня,
+// те даты, по которым нет ни одной income-транзакции. Не уходим глубже 30 дней назад.
+function findMissedDaysForIncome(inc, todayIsoStr) {
+  if ((inc.freq || 'monthly') !== 'daily') return [];
+  const todayStr = todayIsoStr || todayIso();
+  const todayDate = new Date(todayStr);
+  const incomeTxs = state.transactions
+    .filter(t => t.type === 'income' && t.incomeId === inc.id)
+    .map(t => t.date)
+    .sort();
+  if (incomeTxs.length === 0) return [];
+  // Отсчёт начинаем от последней записи + 1 день (а не от самой ранней — иначе сразу накинет кучу).
+  const last = incomeTxs[incomeTxs.length - 1];
+  const lastDate = new Date(last);
+  const missed = [];
+  const cur = new Date(lastDate);
+  cur.setDate(cur.getDate() + 1);
+  // Ограничим 30 днями назад от сегодня, чтобы не создавать хаос
+  const earliest = new Date(todayDate); earliest.setDate(earliest.getDate() - 30);
+  if (cur < earliest) cur.setTime(earliest.getTime());
+  while (cur < todayDate) {
+    const iso = `${cur.getFullYear()}-${String(cur.getMonth()+1).padStart(2,'0')}-${String(cur.getDate()).padStart(2,'0')}`;
+    const has = state.transactions.some(t => t.type === 'income' && t.incomeId === inc.id && t.date === iso);
+    if (!has) missed.push(iso);
+    cur.setDate(cur.getDate() + 1);
+  }
+  return missed;
+}
+
+// Предлагает заполнить пропущенные дни (например, если 20 апр был последний, а сегодня 22 —
+// спросит про 21 апр). По одной цене на все дни.
+function offerCatchUpMissedDays(incomeId) {
+  const inc = state.incomes.find(i => i.id === incomeId);
+  if (!inc) return;
+  const missed = findMissedDaysForIncome(inc);
+  if (missed.length === 0) { toast('Пропущенных дней нет'); return; }
+  const curr = inc.currency || 'RUB';
+  const symbol = curr === 'RUB' ? '₽' : (curr === 'USDT' ? '₮' : '$');
+  const defaultAmt = inc.amount || 0;
+  const daysList = missed.map(d => new Date(d).toLocaleDateString('ru-RU', { day:'numeric', month:'short' })).join(', ');
+  const raw = prompt(
+    `🕐 Пропущено ${missed.length} ${missed.length === 1 ? 'день' : (missed.length < 5 ? 'дня' : 'дней')} по «${inc.name}»: ${daysList}.\n\nСколько зашло в эти дни (в среднем, ${symbol} ${curr})? Запишу одинаковую сумму за каждый день.\n\nПусто = отмена.`,
+    defaultAmt ? String(defaultAmt) : ''
+  );
+  if (raw === null) return;
+  const amtNative = parseAmount(raw);
+  if (!isFinite(amtNative) || amtNative <= 0) { alert('Некорректная сумма'); return; }
+  const amtRub = toRub(amtNative, curr);
+  missed.forEach(iso => {
+    pushDailyIncomeTx(inc, iso, amtNative, amtRub, curr);
+  });
   save();
   renderAll();
   const nativeText = curr === 'RUB' ? fmt(amtNative) : `${amtNative} ${symbol}`;
-  toast(`+ ${nativeText} · ${inc.name}`, 'good');
+  toast(`✅ Заполнил ${missed.length} ${missed.length === 1 ? 'день' : 'дней'} по ${nativeText}`, 'good');
 }
 
 function deleteIncome(id) {
@@ -2612,7 +2710,19 @@ function addExpense() {
     if (document.getElementById('exp-payday')) document.getElementById('exp-payday').value = '';
     if (document.getElementById('exp-enddate')) document.getElementById('exp-enddate').value = '';
     if (balEl) balEl.value = '';
-    if (badEl) badEl.checked = false;
+    if (badEl) {
+      badEl.checked = false;
+      // Сброс визуального состояния тоггла
+      const icon = document.getElementById('exp-bad-icon');
+      const row = document.getElementById('exp-bad-row');
+      if (icon) icon.textContent = '⚪';
+      if (row) {
+        row.style.background = '#1a1420';
+        row.style.border = '1px solid var(--border)';
+        row.style.color = '#ff9aa8';
+        row.style.boxShadow = 'none';
+      }
+    }
     renderAll();
   } catch (e) { console.error(e); alert('Ошибка: ' + e.message); }
 }
@@ -4210,11 +4320,41 @@ function computePaycheckAllocations() {
   paychecks.sort((a, b) => a.dateObj - b.dateObj);
   if (paychecks.length === 0) return [];
 
+  // Группировка: несколько доходов на одну дату = одна суммарная выплата.
+  // (Например, Bulldrop ₽ + Bulldrop USDT оба 5 числа — это одна «выплата», а не две.)
+  const grouped = [];
+  const byIso = {};
+  paychecks.forEach(pc => {
+    if (!byIso[pc.iso]) {
+      byIso[pc.iso] = {
+        dateObj: pc.dateObj,
+        iso: pc.iso,
+        incomeName: pc.incomeName,
+        incomeNames: [pc.incomeName],
+        amount: pc.amount,
+        received: pc.received,
+        parts: [{ incomeId: pc.incomeId, incomeName: pc.incomeName, amount: pc.amount, currency: pc.currency }]
+      };
+      grouped.push(byIso[pc.iso]);
+    } else {
+      const g = byIso[pc.iso];
+      g.amount += pc.amount;
+      g.incomeNames.push(pc.incomeName);
+      g.parts.push({ incomeId: pc.incomeId, incomeName: pc.incomeName, amount: pc.amount, currency: pc.currency });
+      // Если хоть одна уже received — считаем группу полученной (иначе план затрёт)
+      g.received = g.received && pc.received;
+    }
+  });
+  grouped.forEach(g => {
+    const uniq = [...new Set(g.incomeNames)];
+    g.incomeName = uniq.join(' + ');
+  });
+
   const allocations = [];
-  for (let i = 0; i < paychecks.length; i++) {
-    const pc = paychecks[i];
+  for (let i = 0; i < grouped.length; i++) {
+    const pc = grouped[i];
     if (pc.received) continue; // уже полученные в прошлом — пропускаем в плане
-    const next = paychecks.slice(i + 1).find(p => !p.received) || paychecks[i + 1];
+    const next = grouped.slice(i + 1).find(p => !p.received) || grouped[i + 1];
     const from = pc.dateObj;
     const to = next
       ? new Date(next.dateObj.getTime() - 1)
@@ -4313,16 +4453,29 @@ function renderPaycheckSplit() {
       ? `<div class="alert danger" style="margin:10px 0 0">⛔ Не хватает <strong>${fmt(over)}</strong>. Часть платежей придётся перенести на другую выплату или добавить доход.</div>`
       : `<div style="font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5">После обязательных останется <strong style="color:var(--accent)">${fmt(leftover)}</strong> на жизнь и цели.</div>`;
 
-    const curSym = pc.currency === 'USDT' ? '₮' : (pc.currency === 'USD' ? '$' : '₽');
+    // Если на эту дату несколько доходов — покажем их разбивку под заголовком.
+    const parts = Array.isArray(pc.parts) ? pc.parts : [];
+    const hasMulti = parts.length > 1;
+    const partsLine = hasMulti
+      ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">${parts.map(p => {
+          const sym = p.currency === 'USDT' ? '₮' : (p.currency === 'USD' ? '$' : '₽');
+          const showRub = p.currency !== 'RUB';
+          return `${p.incomeName} ≈ ${fmt(p.amount)}${showRub ? ` (${sym})` : ''}`;
+        }).join(' · ')}</div>`
+      : (parts[0] && parts[0].currency && parts[0].currency !== 'RUB'
+          ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">конвертировано из ${parts[0].currency}</div>`
+          : '');
+    const hasNonRub = parts.some(p => p.currency && p.currency !== 'RUB');
     html += `<div class="card" style="margin-bottom:12px;padding:14px;border-left:3px solid var(--accent)">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
         <div>
           <div style="font-size:14px;font-weight:700">💰 ${pc.incomeName}</div>
           <div style="font-size:11px;color:var(--muted)">${pcDate} · ${weekDay} → окно до ${toDate}</div>
+          ${partsLine}
         </div>
         <div style="text-align:right">
           <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:var(--accent)">+${fmt(pc.amount)}</div>
-          <div style="font-size:11px;color:var(--muted)">${pc.currency !== 'RUB' ? '≈ ' : ''}в ₽</div>
+          <div style="font-size:11px;color:var(--muted)">${hasNonRub ? '≈ ' : ''}в ₽</div>
         </div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Отложить сразу: <strong style="color:${coverPct > 100 ? 'var(--accent2)' : (coverPct > 70 ? '#ff9f4f' : 'var(--accent)')}">${fmt(a.total)}</strong> (${coverPct}% выплаты)</div>
@@ -4688,9 +4841,15 @@ function renderIncome() {
           ? `сегодня: ${fmt(loggedTodayRub)}`
           : `сегодня: ${loggedTodayNative.toFixed(2)} ${curr === 'USDT' ? '₮' : '$'} (≈ ${fmt(loggedTodayRub)})`)
       : 'сегодня: пока 0';
+    // Сколько дней не зафиксировано после последней транзакции (до сегодня не включительно).
+    const missedDays = freq === 'daily' ? findMissedDaysForIncome(i).length : 0;
+    const missedBtn = missedDays > 0
+      ? `<button class="btn btn-ghost" style="padding:8px 12px;font-size:12px;color:#ff9f4f;border-color:#ff9f4f" onclick="offerCatchUpMissedDays('${i.id}')">🕐 Догнать ${missedDays} ${missedDays === 1 ? 'день' : (missedDays < 5 ? 'дня' : 'дней')}</button>`
+      : '';
     const dailyActions = freq === 'daily' ? `
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-        <button class="btn btn-primary" style="padding:8px 12px;font-size:12px;flex:1" onclick="logIncomeForToday('${i.id}')">＋ Зафиксировать сегодня</button>
+        <button class="btn btn-primary" style="padding:8px 12px;font-size:12px;flex:1;min-width:150px" onclick="logIncomeForToday('${i.id}')">＋ Зафиксировать сегодня</button>
+        ${missedBtn}
         <span style="font-size:12px;color:${loggedTodayRub > 0 ? 'var(--accent)' : 'var(--muted)'};align-self:center">${todayText}</span>
       </div>` : '';
 
@@ -4933,12 +5092,53 @@ function toggleTxBad(id) {
   save(); renderAll();
 }
 
-// Подсветка ряда чекбокса «плохая трата» — визуальный сигнал, что метка активна.
+// Синхронизация кнопки-тоггла «плохая трата» с невидимым чекбоксом #tx-bad.
+// Нативный checkbox не всегда хорошо прожимается на iOS — кнопка с onclick надёжнее.
 function syncTxBadRow() {
   const row = document.getElementById('tx-bad-row');
   const bad = document.getElementById('tx-bad');
+  const icon = document.getElementById('tx-bad-icon');
   if (!row || !bad) return;
-  row.classList.toggle('bad-row-on', !!bad.checked);
+  const on = !!bad.checked;
+  if (icon) icon.textContent = on ? '🚫' : '⚪';
+  if (on) {
+    row.style.background = '#3a1820';
+    row.style.border = '1.5px solid #ff5a5a';
+    row.style.color = '#ff7a8a';
+    row.style.boxShadow = '0 0 0 1px #ff5a5a inset';
+  } else {
+    row.style.background = '#1a1420';
+    row.style.border = '1px solid var(--border)';
+    row.style.color = '#ff9aa8';
+    row.style.boxShadow = 'none';
+  }
+}
+function toggleTxBadRow() {
+  const bad = document.getElementById('tx-bad');
+  if (!bad) return;
+  bad.checked = !bad.checked;
+  syncTxBadRow();
+}
+function toggleExpBadRow() {
+  const bad = document.getElementById('exp-bad');
+  const row = document.getElementById('exp-bad-row');
+  const icon = document.getElementById('exp-bad-icon');
+  if (!bad) return;
+  bad.checked = !bad.checked;
+  const on = !!bad.checked;
+  if (icon) icon.textContent = on ? '🚫' : '⚪';
+  if (!row) return;
+  if (on) {
+    row.style.background = '#3a1820';
+    row.style.border = '1.5px solid #ff5a5a';
+    row.style.color = '#ff7a8a';
+    row.style.boxShadow = '0 0 0 1px #ff5a5a inset';
+  } else {
+    row.style.background = '#1a1420';
+    row.style.border = '1px solid var(--border)';
+    row.style.color = '#ff9aa8';
+    row.style.boxShadow = 'none';
+  }
 }
 
 // Быстрый чип: подставляет название и категорию, включает метку «плохая трата»
@@ -6715,14 +6915,55 @@ const QUICK_CATS = [
   { emoji: '📦', cat: '📦 Разное', lab: 'Прочее', presets: [100, 500, 1000] }
 ];
 let quickPick = QUICK_CATS[0];
+let quickBad = false;
+
 function openQuickSheet() {
   document.getElementById('sheet-backdrop').classList.add('open');
   document.getElementById('quick-sheet').classList.add('open');
   renderQuickGrid();
   document.getElementById('quick-amt').value = '';
   document.getElementById('quick-name').value = '';
+  quickBad = false;
+  syncQuickBadUi();
   refreshQuickBalanceSelect();
   setTimeout(() => document.getElementById('quick-amt').focus(), 200);
+}
+
+function toggleQuickBad() {
+  quickBad = !quickBad;
+  syncQuickBadUi();
+}
+function syncQuickBadUi() {
+  const btn = document.getElementById('quick-bad-toggle');
+  const icon = document.getElementById('quick-bad-icon');
+  const lab = document.getElementById('quick-bad-label');
+  if (!btn || !icon || !lab) return;
+  if (quickBad) {
+    btn.style.background = '#3a1820';
+    btn.style.border = '1.5px solid #ff5a5a';
+    btn.style.color = '#ff7a8a';
+    btn.style.boxShadow = '0 0 0 1px #ff5a5a inset';
+    icon.textContent = '🚫';
+    lab.textContent = 'Плохая трата — учтётся в отчёте';
+  } else {
+    btn.style.background = '#1a1420';
+    btn.style.border = '1px solid var(--border)';
+    btn.style.color = '#ff9aa8';
+    btn.style.boxShadow = 'none';
+    icon.textContent = '⚪';
+    lab.textContent = 'Отметить как «плохую»';
+  }
+}
+function applyQuickBadChip(name, cat) {
+  const n = document.getElementById('quick-name');
+  if (n) n.value = name;
+  // Подсветим соответствующую плитку-категорию, если она есть
+  const idx = QUICK_CATS.findIndex(q => q.cat === cat);
+  if (idx >= 0) pickQuick(idx);
+  quickBad = true;
+  syncQuickBadUi();
+  const amt = document.getElementById('quick-amt');
+  if (amt) { amt.focus(); amt.select && amt.select(); }
 }
 
 function refreshQuickBalanceSelect() {
@@ -6772,9 +7013,15 @@ function submitQuick() {
   const balSel = document.getElementById('quick-balance');
   const balanceId = balSel ? balSel.value : '';
 
+  // Автодетект плохой траты по названию (если не отмечено вручную)
+  let bad = quickBad;
+  if (!bad && typeof detectBadName === 'function' && detectBadName(name)) {
+    bad = true; // в быстром флоу не спрашиваем — просто тегаем
+  }
+
   const tx = {
     id: safeId(), date: todayIso(), name, amount: amt,
-    cat: quickPick.cat, type: 'expense'
+    cat: quickPick.cat, type: 'expense', bad
   };
 
   // Привязка к балансу — списываем сразу
