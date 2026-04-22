@@ -819,6 +819,16 @@
     <div id="dash-paycheck-split"></div>
   </div>
 
+  <div class="card" id="dash-past-paycheck-card" style="display:none">
+    <div class="card-title">План по прошлой выплате</div>
+    <div id="dash-past-paycheck"></div>
+  </div>
+
+  <div class="card" id="dash-bad-card" style="display:none">
+    <div class="card-title">🚫 Плохие траты</div>
+    <div id="dash-bad"></div>
+  </div>
+
   <div class="card">
     <div class="card-title">Календарь ближайших 14 дней</div>
     <div id="dash-upcoming"></div>
@@ -895,7 +905,7 @@
   <div class="section-title">Источники дохода</div>
 
   <div class="card">
-    <div class="card-title">Добавить доход</div>
+    <div class="card-title" id="inc-form-title">Добавить доход</div>
     <div class="form-group">
       <label>Название</label>
       <input id="inc-name" type="text" placeholder="Зарплата, фриланс, аренда…">
@@ -963,7 +973,10 @@
         💡 Если выбрать расход (например <strong>Квартира</strong>), этот доход больше <strong>не будет распыляться</strong> на цели, привычки и дневной бюджет. Он копится на выбранный расход. Излишек остаётся «в запасе» на тот же расход.
       </div>
     </div>
-    <button class="btn btn-primary" onclick="addIncome()">+ Добавить</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-primary" id="inc-submit-btn" style="flex:1;min-width:140px" onclick="submitIncome()">+ Добавить</button>
+      <button class="btn btn-ghost" id="inc-cancel-btn" style="flex:1;min-width:140px;display:none" onclick="cancelEditIncome()">Отмена</button>
+    </div>
   </div>
 
   <div id="income-list"></div>
@@ -1032,6 +1045,15 @@
         При удалении расхода все списания вернутся обратно.
       </div>
     </div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input id="exp-bad" type="checkbox" style="width:18px;height:18px;accent-color:#ff5a5a">
+        <span>🚫 Плохой расход — подписка / регулярка, которую хочется закрыть</span>
+      </label>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
+        Бар по пятницам, ненужная подписка, дорогая доставка еды — то, что «утекает» регулярно. В «Плохих тратах месяца» будет виден реальный масштаб.
+      </div>
+    </div>
     <button class="btn btn-primary" onclick="addExpense()">+ Добавить</button>
   </div>
 
@@ -1076,6 +1098,15 @@
       </select>
       <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">Если выбрать кошелёк, сумма сразу уменьшит его остаток. При удалении операции остаток вернётся.</div>
     </div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input id="tx-bad" type="checkbox" style="width:18px;height:18px;accent-color:#ff5a5a">
+        <span>🚫 Плохая трата — то, что не хотел, но потратил</span>
+      </label>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
+        Алкоголь, наркотики, сигареты, кальян, фастфуд, импульсивный шоппинг — всё, от чего хочется избавиться. В конце месяца увидишь, сколько на это ушло, и поймёшь масштаб.
+      </div>
+    </div>
     <button class="btn btn-primary" onclick="addTransaction()">+ Добавить трату</button>
   </div>
 
@@ -1096,6 +1127,17 @@
     <div class="form-group">
       <label>Название</label>
       <input id="cr-name" type="text" placeholder="Ипотека, автокредит, долг другу…">
+    </div>
+    <div class="form-group">
+      <label>Тип</label>
+      <select id="cr-kind">
+        <option value="mandatory">🔴 Обязательный (с %, гасить как можно быстрее)</option>
+        <option value="revolving">🟡 Кредитка / возобновляемая (можно «не платить» — снял и обратно закинул)</option>
+      </select>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
+        <b>Обязательный</b> — ипотека, авто, рассрочка, долг с процентами. Планируется в календаре и в «с какой зарплаты что платить», счётчик нагрузки учитывает их в первую очередь.<br>
+        <b>Кредитка</b> — можно временно «отдохнуть» через паузу. Пока стоит на паузе — не попадает в план и pending-события, но остаток долга остаётся в сводке.
+      </div>
     </div>
     <div class="grid-2">
       <div class="form-group">
@@ -1529,6 +1571,7 @@ function load() {
       state.transactions.forEach(t => {
         if (!t.id) t.id = safeId();
         if (!t.type) t.type = 'expense';
+        if (typeof t.bad !== 'boolean') t.bad = false; // 🚫 «плохая трата»
         if (!t.name && t.desc) t.name = t.desc;
         if (!t.cat) t.cat = autoCategorize(t.name || t.desc || 'Разовая трата');
         if (!t.date) t.date = new Date().toISOString().slice(0, 10);
@@ -1553,6 +1596,10 @@ function load() {
         if (typeof c.balanceId === 'undefined') c.balanceId = null;
         if (!Array.isArray(c.deductionLog)) c.deductionLog = [];
         if (!Array.isArray(c.skippedMonths)) c.skippedMonths = [];
+        // Тип кредита: 'mandatory' (обычный с %, надо гасить) или 'revolving' (кредитка — можно паузить)
+        if (c.kind !== 'mandatory' && c.kind !== 'revolving') c.kind = 'mandatory';
+        // Глобальная пауза — не попадает в план, не генерирует pending-события
+        if (typeof c.paused !== 'boolean') c.paused = false;
       });
       state.expenses.forEach(e => {
         if (typeof e.payDay !== 'number' || e.payDay < 1 || e.payDay > 31) e.payDay = (e.payDay === null ? null : null);
@@ -1560,6 +1607,7 @@ function load() {
         // Миграция: новые поля автосписания по расписанию
         if (!Array.isArray(e.deductionLog)) e.deductionLog = [];
         if (!Array.isArray(e.skippedMonths)) e.skippedMonths = [];
+        if (typeof e.bad !== 'boolean') e.bad = false; // 🚫 «плохая трата»
         // Если раньше было разовое списание (balanceDeducted) + payDay — переведём в новую модель
         if (e.balanceId && e.payDay && typeof e.balanceDeducted === 'number' && typeof e.balanceDeductPerMonth !== 'number') {
           e.balanceDeductPerMonth = e.balanceDeducted;
@@ -1660,7 +1708,14 @@ function selectCat(el) {
 // ===== CALCULATIONS =====
 function totalIncome() { return state.incomes.reduce((s, i) => s + monthlyIncome(i), 0); }
 function totalExpenses() { return state.expenses.reduce((s, e) => s + e.amount, 0); }
-function totalCredits() { return state.credits.reduce((s, c) => s + creditMonthlyEq(c), 0); }
+// Активные (не на паузе) кредиты — именно они попадают в план
+function activeCredits() { return (state.credits || []).filter(c => !c.paused); }
+function totalCredits() { return activeCredits().reduce((s, c) => s + creditMonthlyEq(c), 0); }
+// Обязательные платежи (без кредиток, без пауз) — для «что надо отдать с зарплаты»
+function mandatoryCreditsMonthly() {
+  return activeCredits().filter(c => c.kind !== 'revolving')
+    .reduce((s, c) => s + creditMonthlyEq(c), 0);
+}
 function totalGoalsMonthly() { return state.goals.reduce((s, g) => s + (g.monthly || 0), 0); }
 // ===== EARMARKED INCOME =====
 // Доход, зарезервированный под конкретный расход (BitZone → Квартира),
@@ -1988,7 +2043,9 @@ function upcomingEvents(daysAhead = 14) {
   });
 
   // Кредиты — считаем один раз по всему диапазону (biweekly/weekly не привязаны к месяцу)
+  // Паузные не попадают в календарь — но и «кредитки на паузе» не захламляют план.
   state.credits.forEach(cr => {
+    if (cr.paused) return;
     const dates = creditChargeDatesInRange(cr, today, until);
     dates.forEach(d => {
       events.push({
@@ -1997,7 +2054,8 @@ function upcomingEvents(daysAhead = 14) {
         kind: 'credit',
         name: cr.name,
         amount: cr.monthly,
-        icon: '🏦'
+        icon: cr.kind === 'revolving' ? '💳' : '🏦',
+        creditKind: cr.kind || 'mandatory'
       });
     });
   });
@@ -2031,8 +2089,9 @@ function commitmentsBetween(todayDate, untilDate) {
       sum += exp.amount || 0;
     });
   });
-  // Кредиты — включая biweekly/weekly
+  // Кредиты — включая biweekly/weekly (паузные пропускаем)
   state.credits.forEach(cr => {
+    if (cr.paused) return;
     const dates = creditChargeDatesInRange(cr, today, until);
     sum += (cr.monthly || 0) * dates.length;
   });
@@ -2204,7 +2263,79 @@ function updateIncomeScheduleFields() {
   }
 }
 
-function addIncome() {
+// id редактируемого дохода (null = создаём новый)
+let editingIncomeId = null;
+
+function resetIncomeForm() {
+  editingIncomeId = null;
+  document.getElementById('inc-name').value = '';
+  document.getElementById('inc-amount').value = '';
+  const currencyEl = document.getElementById('inc-currency');
+  if (currencyEl) currencyEl.value = 'RUB';
+  const freqEl = document.getElementById('inc-freq');
+  if (freqEl) freqEl.value = 'monthly';
+  const typeEl = document.getElementById('inc-type');
+  if (typeEl) typeEl.value = 'stable';
+  if (document.getElementById('inc-payday-1')) document.getElementById('inc-payday-1').value = '';
+  if (document.getElementById('inc-payday-2')) document.getElementById('inc-payday-2').value = '';
+  const balSel = document.getElementById('inc-balance');
+  if (balSel) balSel.value = '';
+  const earmarkSel = document.getElementById('inc-earmark');
+  if (earmarkSel) earmarkSel.value = '';
+  const title = document.getElementById('inc-form-title');
+  if (title) title.textContent = 'Добавить доход';
+  const btn = document.getElementById('inc-submit-btn');
+  if (btn) btn.textContent = '+ Добавить';
+  const cancel = document.getElementById('inc-cancel-btn');
+  if (cancel) cancel.style.display = 'none';
+  updateIncomeScheduleFields();
+}
+
+function cancelEditIncome() {
+  resetIncomeForm();
+  renderAll();
+}
+
+// Загружаем существующий доход в форму для правки
+function editIncome(id) {
+  const inc = state.incomes.find(i => i.id === id);
+  if (!inc) return;
+  editingIncomeId = id;
+  document.getElementById('inc-name').value = inc.name || '';
+  document.getElementById('inc-amount').value = inc.amount || '';
+  const currencyEl = document.getElementById('inc-currency');
+  if (currencyEl) currencyEl.value = inc.currency || 'RUB';
+  const freqEl = document.getElementById('inc-freq');
+  if (freqEl) freqEl.value = inc.freq || 'monthly';
+  const typeEl = document.getElementById('inc-type');
+  if (typeEl) typeEl.value = inc.type || 'stable';
+  const pd = Array.isArray(inc.payDays) ? inc.payDays : [];
+  const pd1 = document.getElementById('inc-payday-1');
+  const pd2 = document.getElementById('inc-payday-2');
+  if (pd1) pd1.value = pd[0] || '';
+  if (pd2) pd2.value = pd[1] || '';
+  updateIncomeScheduleFields();
+  // Обновим селекты балансов/ящика назначения до установки значений
+  refreshIncomeBalanceSelect();
+  refreshIncomeEarmarkSelect();
+  const balSel = document.getElementById('inc-balance');
+  if (balSel) balSel.value = inc.balanceId || '';
+  const earmarkSel = document.getElementById('inc-earmark');
+  if (earmarkSel) earmarkSel.value = inc.earmarkedFor || '';
+  // Переключаем вид
+  const title = document.getElementById('inc-form-title');
+  if (title) title.textContent = `✏️ Правка: ${inc.name}`;
+  const btn = document.getElementById('inc-submit-btn');
+  if (btn) btn.textContent = '💾 Сохранить изменения';
+  const cancel = document.getElementById('inc-cancel-btn');
+  if (cancel) cancel.style.display = 'inline-block';
+  // Прокрутка к форме
+  const card = document.getElementById('inc-form-title');
+  if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Сабмит формы: либо создание, либо апдейт
+function submitIncome() {
   try {
     const name = document.getElementById('inc-name').value.trim();
     const amount = parseAmount(document.getElementById('inc-amount').value);
@@ -2230,18 +2361,38 @@ function addIncome() {
     if (freq === 'weekly') payDays = normalizePayDays(freq, [payDay1]);
     if (freq === 'yearly') payDays = normalizePayDays(freq, [payDay1]);
 
-    state.incomes.push({ id: safeId(), name, amount, currency, type, freq, payDays, balanceId: balanceId || null, earmarkedFor: earmarkedFor || null });
+    if (editingIncomeId) {
+      const inc = state.incomes.find(x => x.id === editingIncomeId);
+      if (!inc) { alert('Доход не найден'); resetIncomeForm(); return; }
+      // Если поменялась валюта / частота / сумма — предупредим, что paidLog/skipped могли «повиснуть»
+      inc.name = name;
+      inc.amount = amount;
+      inc.currency = currency;
+      inc.type = type;
+      inc.freq = freq;
+      inc.payDays = payDays;
+      inc.balanceId = balanceId || null;
+      inc.earmarkedFor = earmarkedFor || null;
+      save();
+      toast(`✏️ «${inc.name}» обновлён`, 'good');
+      resetIncomeForm();
+      renderAll();
+      return;
+    }
+
+    state.incomes.push({
+      id: safeId(), name, amount, currency, type, freq, payDays,
+      balanceId: balanceId || null, earmarkedFor: earmarkedFor || null,
+      paidLog: [], skippedPayDates: []
+    });
     save();
-    document.getElementById('inc-name').value = '';
-    document.getElementById('inc-amount').value = '';
-    if (currencyEl) currencyEl.value = 'RUB';
-    if (document.getElementById('inc-payday-1')) document.getElementById('inc-payday-1').value = '';
-    if (document.getElementById('inc-payday-2')) document.getElementById('inc-payday-2').value = '';
-    if (balSel) balSel.value = '';
-    if (earmarkSel) earmarkSel.value = '';
+    resetIncomeForm();
     renderAll();
   } catch (e) { console.error(e); alert('Ошибка: ' + e.message); }
 }
+
+// Совместимость со старым именем — на случай если где-то ещё вызывается
+function addIncome() { submitIncome(); }
 
 // Быстрая запись за сегодня — создаёт income-transaction на сегодня и пополняет привязанный счёт
 function logIncomeForToday(incomeId) {
@@ -2291,6 +2442,10 @@ function logIncomeForToday(incomeId) {
 }
 
 function deleteIncome(id) {
+  const inc = state.incomes.find(i => i.id === id);
+  if (!inc) return;
+  if (!confirm(`Удалить источник «${inc.name}»? Записи в истории транзакций останутся.`)) return;
+  if (editingIncomeId === id) resetIncomeForm();
   state.incomes = state.incomes.filter(i => i.id !== id);
   save(); renderAll();
 }
@@ -2307,10 +2462,12 @@ function addExpense() {
     const payDay = isNaN(payDayRaw) ? null : Math.min(31, Math.max(1, Math.round(payDayRaw)));
     const endDateRaw = (document.getElementById('exp-enddate')?.value || '').trim();
     const endDate = endDateRaw || null; // формат YYYY-MM
+    const badEl = document.getElementById('exp-bad');
+    const bad = !!(badEl && badEl.checked);
     if (!name) { alert('Укажи название расхода'); return; }
     if (isNaN(amount) || amount <= 0) { alert('Укажи сумму расхода больше 0'); return; }
 
-    const exp = { id: safeId(), name, amount, type, cat: selectedCat, payDay, endDate, deductionLog: [] };
+    const exp = { id: safeId(), name, amount, type, cat: selectedCat, payDay, endDate, deductionLog: [], bad };
 
     // Привязка к балансу
     if (balanceId) {
@@ -2396,6 +2553,7 @@ function addExpense() {
     if (document.getElementById('exp-payday')) document.getElementById('exp-payday').value = '';
     if (document.getElementById('exp-enddate')) document.getElementById('exp-enddate').value = '';
     if (balEl) balEl.value = '';
+    if (badEl) badEl.checked = false;
     renderAll();
   } catch (e) { console.error(e); alert('Ошибка: ' + e.message); }
 }
@@ -2496,6 +2654,7 @@ function findPendingCreditDeductions() {
 
   (state.credits || []).forEach(cr => {
     if (!cr.balanceId) return;
+    if (cr.paused) return; // на паузе — не напоминаем
     if (!Array.isArray(cr.deductionLog)) cr.deductionLog = [];
     if (!Array.isArray(cr.skippedMonths)) cr.skippedMonths = [];
     const bal = state.balances.find(b => b.id === cr.balanceId);
@@ -2830,6 +2989,19 @@ function refreshCreditBalanceSelect() {
   if (current && state.balances.find(b => b.id === current)) sel.value = current;
 }
 
+// Автодетект «плохой» траты по ключевым словам — подсказка, а не принуждение
+const BAD_KEYWORDS = [
+  'алкогол','пиво','вино','водка','виски','ром','коктейл','бар','паб',
+  'сигарет','табак','ваp','вейп','кальян','никотин',
+  'наркот','трав',
+  'фастфуд','fast food','mcdonald','макдак','мак дак','kfc','бургер','доширак','snickers','шоколад','сладк','кола','пепси','энергет',
+  'казино','букмекер','ставк','1xbet','fonbet'
+];
+function detectBadName(name) {
+  const n = (name || '').toLowerCase();
+  return BAD_KEYWORDS.some(k => n.includes(k));
+}
+
 function addTransaction() {
   try {
     const name = document.getElementById('tx-name').value.trim();
@@ -2837,10 +3009,16 @@ function addTransaction() {
     const date = document.getElementById('tx-date').value || todayIso();
     const cat = document.getElementById('tx-cat').value;
     const balanceId = document.getElementById('tx-balance').value;
+    const badEl = document.getElementById('tx-bad');
+    let bad = !!(badEl && badEl.checked);
     if (!name) { alert('Укажи название траты'); return; }
     if (isNaN(amount) || amount <= 0) { alert('Укажи сумму траты больше 0'); return; }
+    // Если пользователь не отметил — подскажем по словам
+    if (!bad && detectBadName(name)) {
+      bad = confirm(`Похоже, «${name}» — плохая трата (алкоголь/сигареты/фастфуд/...). Отметить как 🚫?`);
+    }
 
-    const tx = { id: safeId(), date, name, amount, cat, type: 'expense' };
+    const tx = { id: safeId(), date, name, amount, cat, type: 'expense', bad };
     if (balanceId) {
       const bal = state.balances.find(b => b.id === balanceId);
       if (bal) {
@@ -2862,6 +3040,7 @@ function addTransaction() {
     document.getElementById('tx-date').value = todayIso();
     document.getElementById('tx-cat').value = '🍔 Еда';
     document.getElementById('tx-balance').value = '';
+    if (badEl) badEl.checked = false;
     renderAll();
   } catch (e) { console.error(e); alert('Ошибка: ' + e.message); }
 }
@@ -2934,6 +3113,8 @@ function addCredit() {
     const anchorDate = (anchorEl && anchorEl.value) || null;
     const balanceEl = document.getElementById('cr-balance');
     const balanceId = (balanceEl && balanceEl.value) || null;
+    const kindEl = document.getElementById('cr-kind');
+    const kind = (kindEl && (kindEl.value === 'revolving' ? 'revolving' : 'mandatory')) || 'mandatory';
 
     // Процент собираем из того поля, которое сейчас видно
     let rate;
@@ -2988,6 +3169,8 @@ function addCredit() {
       freq,
       anchorDate,
       balanceId: balanceId || null, // с какого счёта списывается
+      kind,                         // 'mandatory' | 'revolving'
+      paused: false,
       deductionLog: [],             // ключи уже подтверждённых списаний (YYYY-MM или YYYY-MM-DD)
       skippedMonths: []
     });
@@ -3006,6 +3189,7 @@ function addCredit() {
     if (balanceEl) balanceEl.value = '';
     if (freqEl) freqEl.value = 'monthly';
     if (termUnitEl) termUnitEl.value = 'months';
+    if (kindEl) kindEl.value = 'mandatory';
     updateCreditScheduleFields();
     renderAll();
     console.log('[addCredit] добавлено. всего кредитов:', state.credits.length);
@@ -3852,6 +4036,10 @@ function renderDashboard() {
 
   // Распределение по выплатам (5/20 и т.п.)
   renderPaycheckSplit();
+  // Ретроспектива прошлой выплаты
+  renderPastPaycheck();
+  // 🚫 плохие траты
+  renderBadSpending();
 
   // Upcoming 14 days
   renderUpcomingCalendar();
@@ -3973,12 +4161,13 @@ function computePaycheckAllocations() {
       : new Date(from.getTime() + 30 * 24 * 3600 * 1000);
 
     const outflows = [];
-    // Кредиты в окне
+    // Кредиты в окне — паузные пропускаем
     (state.credits || []).forEach(cr => {
+      if (cr.paused) return;
       const dates = creditChargeDatesInRange(cr, from, to);
       dates.forEach(d => outflows.push({
         kind: 'credit', name: cr.name, amount: cr.monthly || 0, date: d, payDay: d.getDate(),
-        hasBalance: !!cr.balanceId
+        hasBalance: !!cr.balanceId, creditKind: cr.kind || 'mandatory'
       }));
     });
     // Запланированные расходы с payDay, покрываются только необеспеченная часть (за вычетом BitZone и т.п.)
@@ -4084,6 +4273,197 @@ function renderPaycheckSplit() {
   });
 
   wrap.innerHTML = html;
+}
+
+// ===== ПЛАН ПО ПРОШЛОЙ ВЫПЛАТЕ =====
+// Собираем последнюю уже полученную зарплату, считаем что с неё ДОЛЖНО было уйти
+// до следующей зарплаты, и сверяем с фактом (transactions).
+function renderPastPaycheck() {
+  const card = document.getElementById('dash-past-paycheck-card');
+  const wrap = document.getElementById('dash-past-paycheck');
+  if (!card || !wrap) return;
+
+  // Собираем все paychecks (аналогично computePaycheckAllocations)
+  const paychecks = [];
+  const today = new Date(); today.setHours(0,0,0,0);
+  const horizonBack = new Date(today.getFullYear(), today.getMonth() - 2, 1);
+  (state.incomes || []).forEach(inc => {
+    if (inc.freq !== 'semimonthly' && inc.freq !== 'monthly') return;
+    const payDays = inc.freq === 'monthly'
+      ? (inc.payDay ? [inc.payDay] : [])
+      : (Array.isArray(inc.payDays) ? inc.payDays : []);
+    if (payDays.length === 0) return;
+    let cur = new Date(horizonBack);
+    while (cur <= today) {
+      const y = cur.getFullYear(), m = cur.getMonth();
+      payDays.forEach(d => {
+        const day = clampDayToMonth(d, y, m);
+        const pd = new Date(y, m, day); pd.setHours(0,0,0,0);
+        if (pd > today) return;
+        const iso = `${y}-${String(m+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+        paychecks.push({
+          dateObj: pd, iso,
+          incomeId: inc.id, incomeName: inc.name,
+          amount: toRub(inc.amount || 0, inc.currency || 'RUB'),
+          currency: inc.currency || 'RUB',
+          received: Array.isArray(inc.paidLog) && inc.paidLog.includes(iso)
+        });
+      });
+      cur = new Date(y, m + 1, 1);
+    }
+  });
+  paychecks.sort((a, b) => a.dateObj - b.dateObj);
+  // Последняя выплата = самая свежая в прошлом
+  const past = paychecks.filter(p => p.dateObj <= today).pop();
+  if (!past) { card.style.display = 'none'; return; }
+
+  // Окно: от past.dateObj до min(today, следующая выплата)
+  const next = paychecks.find(p => p.dateObj > past.dateObj) || null;
+  const windowEnd = next ? new Date(Math.min(next.dateObj.getTime() - 1, today.getTime())) : today;
+
+  // Плановые списания в этом окне (кредиты + расходы с payDay)
+  const plannedOutflows = [];
+  (state.credits || []).forEach(cr => {
+    if (cr.paused) return;
+    const dates = creditChargeDatesInRange(cr, past.dateObj, windowEnd);
+    dates.forEach(d => plannedOutflows.push({
+      kind: 'credit', name: cr.name, amount: cr.monthly || 0, date: d
+    }));
+  });
+  (state.expenses || []).forEach(e => {
+    if (!e.payDay) return;
+    let cur = new Date(past.dateObj.getFullYear(), past.dateObj.getMonth(), 1);
+    const end = new Date(windowEnd.getFullYear(), windowEnd.getMonth(), 1);
+    while (cur <= end) {
+      const dday = clampDayToMonth(e.payDay, cur.getFullYear(), cur.getMonth());
+      const ed = new Date(cur.getFullYear(), cur.getMonth(), dday);
+      if (ed >= past.dateObj && ed <= windowEnd && !isExpenseFinishedForDate(e, ed)) {
+        const cov = earmarkedCoverage(e.id);
+        const uncovered = Math.max(0, (e.amount || 0) - cov);
+        if (uncovered > 0) plannedOutflows.push({
+          kind: 'expense', name: e.name, amount: uncovered, date: ed
+        });
+      }
+      cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1);
+    }
+  });
+  const planned = plannedOutflows.reduce((s, o) => s + o.amount, 0);
+
+  // Факт — все transactions в этом окне, не 🔄 Между своими, не income
+  const pastIso = past.iso;
+  const endIso = `${windowEnd.getFullYear()}-${String(windowEnd.getMonth()+1).padStart(2,'0')}-${String(windowEnd.getDate()).padStart(2,'0')}`;
+  const factTxs = (state.transactions || []).filter(t =>
+    t.type !== 'income' &&
+    t.cat !== '🔄 Между своими' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(t.date || '') &&
+    t.date >= pastIso && t.date <= endIso
+  );
+  const factSum = factTxs.reduce((s, t) => s + (t.amount || 0), 0);
+  const factBad = factTxs.filter(t => t.bad).reduce((s, t) => s + (t.amount || 0), 0);
+
+  const shouldBeLeft = Math.max(0, past.amount - planned);
+  const actualLeft = past.amount - factSum;
+  const delta = shouldBeLeft - actualLeft; // >0 — потратил больше плана
+  const deltaColor = delta > 0 ? 'var(--accent2)' : 'var(--accent)';
+  const deltaSign = delta > 0 ? '−' : '+';
+
+  card.style.display = 'block';
+  const pcDateLbl = past.dateObj.toLocaleDateString('ru-RU', { day:'numeric', month:'long' });
+  const endLbl = windowEnd.toLocaleDateString('ru-RU', { day:'numeric', month:'short' });
+  const statusText = next
+    ? (windowEnd >= today ? 'идёт сейчас' : 'завершён')
+    : 'идёт сейчас';
+  wrap.innerHTML = `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">
+      Последняя зарплата: <strong style="color:var(--accent)">${past.incomeName}, +${fmt(past.amount)} от ${pcDateLbl}</strong>.
+      Период до следующей выплаты (${endLbl}) — ${statusText}.
+    </div>
+    <div class="grid-2" style="gap:10px;margin-bottom:10px">
+      <div style="padding:10px;background:var(--surface2);border-radius:10px">
+        <div style="font-size:11px;color:var(--muted)">План списаний</div>
+        <div style="font-family:'Unbounded',sans-serif;font-size:18px;font-weight:700;color:#ff9f4f">${fmt(planned)}</div>
+      </div>
+      <div style="padding:10px;background:var(--surface2);border-radius:10px">
+        <div style="font-size:11px;color:var(--muted)">Факт трат за период</div>
+        <div style="font-family:'Unbounded',sans-serif;font-size:18px;font-weight:700;color:var(--accent2)">${fmt(factSum)}</div>
+      </div>
+    </div>
+    <div class="grid-2" style="gap:10px;margin-bottom:10px">
+      <div style="padding:10px;background:var(--surface2);border-radius:10px">
+        <div style="font-size:11px;color:var(--muted)">Должно было остаться</div>
+        <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:var(--accent)">${fmt(shouldBeLeft)}</div>
+      </div>
+      <div style="padding:10px;background:var(--surface2);border-radius:10px">
+        <div style="font-size:11px;color:var(--muted)">Фактически осталось (прибл.)</div>
+        <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:${actualLeft < 0 ? 'var(--accent2)' : 'var(--accent)'}">${fmt(actualLeft)}</div>
+      </div>
+    </div>
+    <div style="font-size:12px;color:${deltaColor};line-height:1.5">
+      ${Math.abs(delta) < 1
+        ? '✅ В точку — попал в план.'
+        : (delta > 0
+          ? `⚠️ Потратил сверх плана на <strong>${fmt(delta)}</strong> — столько не хватило до «идеального» распределения.`
+          : `🎉 Сэкономил <strong>${fmt(-delta)}</strong> относительно плана.`)}
+    </div>
+    ${factBad > 0 ? `<div style="font-size:12px;color:#ff5a5a;margin-top:8px">🚫 Из них на «плохие» траты: <strong>${fmt(factBad)}</strong> — без них ${delta > 0 ? 'делта была бы меньше' : 'остаток был бы ещё больше'}.</div>` : ''}
+  `;
+}
+
+// ===== ПЛОХИЕ ТРАТЫ (месяц) =====
+function renderBadSpending() {
+  const card = document.getElementById('dash-bad-card');
+  const wrap = document.getElementById('dash-bad');
+  if (!card || !wrap) return;
+
+  const ymKey = currentMonthKey();
+  const monthTxs = (state.transactions || []).filter(t =>
+    t.type !== 'income' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(t.date || '') &&
+    t.date.slice(0, 7) === ymKey
+  );
+  const badTxs = monthTxs.filter(t => t.bad);
+  const badTxSum = badTxs.reduce((s, t) => s + (t.amount || 0), 0);
+  const badExpensesMonthly = (state.expenses || []).filter(e => e.bad).reduce((s, e) => s + (e.amount || 0), 0);
+  const totalBad = badTxSum + badExpensesMonthly;
+
+  if (totalBad <= 0) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+
+  const monthSpent = monthTxs.reduce((s, t) => s + (t.amount || 0), 0);
+  const pct = monthSpent > 0 ? Math.round((badTxSum / monthSpent) * 100) : 0;
+  const yearProj = totalBad * 12;
+
+  // Топ-5 плохих трат месяца
+  const topTxs = badTxs.slice().sort((a, b) => b.amount - a.amount).slice(0, 5);
+  const topHtml = topTxs.length > 0
+    ? topTxs.map(t => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--muted)">${t.date.slice(5)} · ${t.name}</span>
+        <strong style="color:#ff5a5a">−${fmt(t.amount)}</strong>
+      </div>`).join('')
+    : '';
+
+  const badExpensesItems = (state.expenses || []).filter(e => e.bad);
+  const badExpHtml = badExpensesItems.length > 0
+    ? `<div style="margin-top:10px;font-size:12px;color:var(--muted)">🔁 Регулярно (₽/мес):</div>` +
+      badExpensesItems.map(e => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">
+        <span>${e.name}</span><strong style="color:#ff5a5a">−${fmt(e.amount)}/мес</strong>
+      </div>`).join('')
+    : '';
+
+  wrap.innerHTML = `
+    <div style="padding:12px;background:rgba(255,90,90,0.08);border-radius:10px;border-left:3px solid #ff5a5a;margin-bottom:12px">
+      <div style="font-size:11px;color:var(--muted)">За этот месяц на «плохое»</div>
+      <div style="font-family:'Unbounded',sans-serif;font-size:24px;font-weight:700;color:#ff5a5a">${fmt(totalBad)}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">
+        Разовых: ${fmt(badTxSum)}${pct > 0 ? ` (${pct}% от всех трат)` : ''} · регулярных: ${fmt(badExpensesMonthly)}/мес
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">
+        За год при таком темпе — <strong style="color:#ff5a5a">${fmt(yearProj)}</strong>. На что можно пустить? Цели, подушка, закрыть кредит.
+      </div>
+    </div>
+    ${topHtml ? `<div style="font-size:12px;color:var(--muted);margin-bottom:4px">Топ-5 разовых:</div>${topHtml}` : ''}
+    ${badExpHtml}
+  `;
 }
 
 function renderUpcomingCalendar() {
@@ -4298,17 +4678,19 @@ function renderIncome() {
     const amtDisplay = curr === 'RUB'
       ? fmt(i.amount)
       : `${i.amount} ${curr === 'USDT' ? '₮' : '$'}`;
+    const editingClass = editingIncomeId === i.id ? 'background:rgba(79,159,255,0.10);border-radius:12px' : '';
     html += `
-      <div class="item-row">
+      <div class="item-row" style="${editingClass}">
         <div class="item-left">
           <div class="item-icon" style="background:#0f2d1f">💰</div>
           <div class="two-row">
-            <div class="item-name">${i.name}</div>
+            <div class="item-name">${i.name}${editingIncomeId === i.id ? ' <span style="font-size:10px;color:#4f9fff">· редактируется</span>' : ''}</div>
             <div class="item-sub">${typeLabel[i.type]} · ${FREQ_LABEL[freq]}${currNote}${freqNote}${payDaysText(i)}${balNote}${earNote}</div>
           </div>
         </div>
-        <div style="display:flex;align-items:center">
+        <div style="display:flex;align-items:center;gap:2px">
           <div class="item-amount amount-green">${amtDisplay}</div>
+          <button class="delete-btn" title="Редактировать" onclick="editIncome('${i.id}')">✎</button>
           <button class="delete-btn" onclick="deleteIncome('${i.id}')">✕</button>
         </div>
       </div>${dailyActions}${scheduledActions}`;
@@ -4398,18 +4780,21 @@ function renderExpenses() {
           </div>`;
         }
         const finished = isExpenseFinished(e);
+        const isBad = !!e.bad;
+        const badMark = isBad ? ' <span style="color:#ff5a5a;font-weight:700">🚫</span>' : '';
         html += `
-          <div class="item-row" style="${finished ? 'opacity:.5' : ''}">
+          <div class="item-row" style="${finished ? 'opacity:.5' : ''};${isBad ? 'background:rgba(255,90,90,0.06);border-radius:12px' : ''}">
             <div class="item-left">
               <div class="two-row">
-                <div class="item-name">${e.name}${finished ? ' · ✅ закрыт' : ''}</div>
+                <div class="item-name">${e.name}${badMark}${finished ? ' · ✅ закрыт' : ''}</div>
                 <div class="item-sub">${sub}</div>
                 ${statusLine}
                 ${coverageLine}
               </div>
             </div>
-            <div style="display:flex;align-items:center">
+            <div style="display:flex;align-items:center;gap:2px">
               <div class="item-amount amount-red">${fmt(e.amount)}</div>
+              <button class="delete-btn" title="${isBad ? 'Убрать метку «плохой»' : 'Отметить как плохой расход'}" onclick="toggleExpenseBad('${e.id}')">${isBad ? '✓' : '🚫'}</button>
               <button class="delete-btn" onclick="deleteExpense('${e.id}')">✕</button>
             </div>
           </div>`;
@@ -4420,6 +4805,10 @@ function renderExpenses() {
     const optionalTotal = state.expenses.filter(e => e.type === 'optional').reduce((s, e) => s + e.amount, 0);
     if (optionalTotal > 0) {
       html += `<div class="alert">✂️ Необязательные месячные расходы: <strong>${fmt(optionalTotal)}/мес</strong> — их проще всего сокращать при перегрузе бюджета.</div>`;
+    }
+    const badMonthTotal = state.expenses.filter(e => e.bad).reduce((s, e) => s + e.amount, 0);
+    if (badMonthTotal > 0) {
+      html += `<div class="alert danger">🚫 «Плохих» регулярных расходов: <strong>${fmt(badMonthTotal)}/мес</strong>. Закрой хотя бы один — эти деньги можно пустить на цели.</div>`;
     }
 
     list.innerHTML = html;
@@ -4438,30 +4827,58 @@ function renderTransactions() {
     return;
   }
 
-  const expTotal = items.filter(t => t.type !== 'income').reduce((s, t) => s + t.amount, 0);
-  const avgCheck = expTotal > 0 ? expTotal / items.filter(t => t.type !== 'income').length : 0;
-  let html = `<div class="alert">За этот месяц: <strong>${fmt(expTotal)}</strong> разовых трат · средний чек <strong>${fmt(avgCheck)}</strong> · записей ${items.length}</div>`;
+  const expItems = items.filter(t => t.type !== 'income');
+  const expTotal = expItems.reduce((s, t) => s + t.amount, 0);
+  const avgCheck = expTotal > 0 ? expTotal / expItems.length : 0;
+  const badTotal = expItems.filter(t => t.bad).reduce((s, t) => s + t.amount, 0);
+  const badPct = expTotal > 0 ? Math.round((badTotal / expTotal) * 100) : 0;
+  const badBlock = badTotal > 0
+    ? `<div class="alert danger" style="margin-top:8px">🚫 Плохих трат: <strong>${fmt(badTotal)}</strong> (${badPct}% от всех). Это то, от чего хочется отказаться.</div>`
+    : '';
+  let html = `<div class="alert">За этот месяц: <strong>${fmt(expTotal)}</strong> разовых трат · средний чек <strong>${fmt(avgCheck)}</strong> · записей ${items.length}</div>${badBlock}`;
   items.forEach(t => {
     let sub = `${t.date} · ${t.cat || '📦 Разное'}`;
     if (t.balanceId) {
       const bal = state.balances.find(b => b.id === t.balanceId);
       if (bal) sub += ` · 💳 ${bal.name}`;
     }
+    const isBad = t.bad && t.type !== 'income';
+    const badMark = isBad ? ' <span style="color:#ff5a5a;font-weight:700">🚫</span>' : '';
+    const toggleBtn = t.type !== 'income'
+      ? `<button class="delete-btn" title="${isBad ? 'Убрать метку «плохая»' : 'Отметить как плохую трату'}" onclick="toggleTxBad('${t.id}')">${isBad ? '✓' : '🚫'}</button>`
+      : '';
     html += `
-      <div class="item-row">
+      <div class="item-row" style="${isBad ? 'background:rgba(255,90,90,0.06);border-radius:12px' : ''}">
         <div class="item-left">
           <div class="two-row">
-            <div class="item-name">${t.name || t.desc || 'Операция'}</div>
+            <div class="item-name">${t.name || t.desc || 'Операция'}${badMark}</div>
             <div class="item-sub">${sub}</div>
           </div>
         </div>
-        <div style="display:flex;align-items:center">
+        <div style="display:flex;align-items:center;gap:2px">
           <div class="item-amount ${t.type === 'income' ? 'amount-green' : 'amount-red'}">${t.type === 'income' ? '+' : ''}${fmt(t.amount)}</div>
+          ${toggleBtn}
           <button class="delete-btn" onclick="deleteTransaction('${t.id}')">✕</button>
         </div>
       </div>`;
   });
   list.innerHTML = html;
+}
+
+// Переключить статус «плохая трата» у записи
+function toggleTxBad(id) {
+  const t = state.transactions.find(x => x.id === id);
+  if (!t) return;
+  t.bad = !t.bad;
+  save(); renderAll();
+}
+
+// Переключить статус «плохой расход» у регулярного расхода
+function toggleExpenseBad(id) {
+  const e = state.expenses.find(x => x.id === id);
+  if (!e) return;
+  e.bad = !e.bad;
+  save(); renderAll();
 }
 
 // ===== RENDER CREDITS =====
@@ -4472,13 +4889,26 @@ function renderCredits() {
     document.getElementById('credit-summary').style.display = 'none';
     return;
   }
-  
+
+  // Сортировка: сначала обязательные (активные, по ставке desc — самые дорогие наверху),
+  // потом кредитки (активные), потом всё, что на паузе.
+  const sorted = [...state.credits].sort((a, b) => {
+    const aP = a.paused ? 1 : 0, bP = b.paused ? 1 : 0;
+    if (aP !== bP) return aP - bP;
+    const rank = k => k === 'revolving' ? 1 : 0;
+    const aR = rank(a.kind), bR = rank(b.kind);
+    if (aR !== bR) return aR - bR;
+    return (b.rate || 0) - (a.rate || 0);
+  });
+
   let html = '';
-  state.credits.forEach(c => {
+  sorted.forEach(c => {
     const freq = c.freq || 'monthly';
     const monthlyEq = creditMonthlyEq(c);
     const monthsLeft = c.total > 0 && monthlyEq > 0 ? Math.ceil(c.total / monthlyEq) : c.months;
     const paidPct = c.total > 0 && c.months > 0 ? Math.max(0, Math.round((1 - c.total / (monthlyEq * c.months)) * 100)) : 0;
+    const isPaused = !!c.paused;
+    const isRev = c.kind === 'revolving';
     const metaBits = [];
     metaBits.push(CREDIT_FREQ_LABEL[freq] || '📅 Раз в месяц');
     if (c.rate > 0) metaBits.push(`${c.rate}% годовых`);
@@ -4498,10 +4928,24 @@ function renderCredits() {
     const paymentLabel = freq === 'monthly' ? 'Платёж/мес'
       : (freq === 'semimonthly' ? 'Платёж (каждый из двух)'
       : (freq === 'biweekly' ? 'Платёж раз в 2 нед.' : 'Платёж в неделю'));
-    html += `<div class="card">
+    const kindBadge = isRev
+      ? `<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#3a2f14;color:#ffcc66;font-size:10px;font-weight:600;margin-left:8px">🟡 Кредитка</span>`
+      : `<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#3a1a1a;color:#ff8080;font-size:10px;font-weight:600;margin-left:8px">🔴 Обязательный</span>`;
+    const pausedBadge = isPaused
+      ? `<span style="display:inline-block;padding:2px 8px;border-radius:999px;background:#333;color:#aaa;font-size:10px;font-weight:600;margin-left:6px">⏸ На паузе</span>`
+      : '';
+    const cardOpacity = isPaused ? 'opacity:0.6' : '';
+    const pauseBtn = isRev
+      ? (isPaused
+        ? `<button class="btn btn-ghost" style="flex:1;min-width:140px;font-size:12px;padding:10px" onclick="toggleCreditPause('${c.id}')">▶️ Возобновить</button>`
+        : `<button class="btn btn-ghost" style="flex:1;min-width:140px;font-size:12px;padding:10px" onclick="toggleCreditPause('${c.id}')">⏸ На паузу</button>`)
+      : '';
+    const kindToggleBtn = `<button class="btn btn-ghost" style="flex:1;min-width:140px;font-size:12px;padding:10px" onclick="toggleCreditKind('${c.id}')">${isRev ? '→ Сделать обязательным' : '→ Сделать кредиткой'}</button>`;
+
+    html += `<div class="card" style="${cardOpacity}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
         <div>
-          <div style="font-size:15px;font-weight:600">${c.name}</div>
+          <div style="font-size:15px;font-weight:600">${c.name}${kindBadge}${pausedBadge}</div>
           <div style="font-size:12px;color:var(--muted);margin-top:2px">${metaBits.join(' · ')}</div>
         </div>
         <button class="delete-btn" onclick="deleteCredit('${c.id}')">✕</button>
@@ -4516,8 +4960,11 @@ function renderCredits() {
       </div>
       ${monthsLeft > 0 ? `<div style="font-size:13px;color:var(--muted)">Осталось ~${monthsLeft} месяцев${c.termUnit === 'weeks' ? ` (≈ ${Math.ceil(monthsLeft * 30.44 / 7)} недель)` : ''}</div>
       <div class="progress-wrap"><div class="progress-bar blue" style="width:${Math.min(100,paidPct)}%"></div></div>` : ''}
+      ${isPaused ? '<div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">На паузе — не попадает в «календарь», «разбивку по зарплатам» и в нагрузку. Остаток долга остаётся в сводке ниже.</div>' : ''}
       <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
-        <button class="btn btn-primary" style="flex:1;min-width:140px;font-size:12px;padding:10px" onclick="payCreditNow('${c.id}')">💸 Внести платёж</button>
+        ${!isPaused ? `<button class="btn btn-primary" style="flex:1;min-width:140px;font-size:12px;padding:10px" onclick="payCreditNow('${c.id}')">💸 Внести платёж</button>` : ''}
+        ${pauseBtn}
+        ${kindToggleBtn}
       </div>
     </div>`;
   });
@@ -4525,6 +4972,10 @@ function renderCredits() {
 
   // Summary
   const total = totalCredits();
+  const mandatoryMo = mandatoryCreditsMonthly();
+  const revolvingMo = activeCredits().filter(c => c.kind === 'revolving')
+    .reduce((s, c) => s + creditMonthlyEq(c), 0);
+  const pausedCount = state.credits.filter(c => c.paused).length;
   const totalDebt = state.credits.reduce((s, c) => s + c.total, 0);
   const inc = totalIncome();
   const ratio = inc > 0 ? Math.round((total / inc) * 100) : null; // null = нельзя посчитать
@@ -4555,13 +5006,46 @@ function renderCredits() {
   document.getElementById('credit-summary').style.display = 'block';
   document.getElementById('credit-summary-content').innerHTML = `
     <div class="grid-2" style="margin-bottom:12px">
-      <div><div style="font-size:11px;color:var(--muted)">Все платежи/мес</div>
+      <div><div style="font-size:11px;color:var(--muted)">Все активные платежи/мес</div>
         <div style="font-family:'Unbounded',sans-serif;font-size:20px;font-weight:700;color:var(--accent2)">${fmt(total)}</div></div>
       <div><div style="font-size:11px;color:var(--muted)">Кредитная нагрузка</div>
         <div style="font-family:'Unbounded',sans-serif;font-size:20px;font-weight:700;color:${ratioColor}">${ratio === null ? '—' : ratio + '%'}</div></div>
     </div>
-    ${totalDebt > 0 ? `<div style="font-size:13px;color:var(--muted)">Общий долг: ${fmt(totalDebt)}</div>` : ''}
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.6">
+      🔴 Обязательные: <strong style="color:#ff8080">${fmt(mandatoryMo)}/мес</strong>
+      ${revolvingMo > 0 ? ` · 🟡 Кредитки: <strong style="color:#ffcc66">${fmt(revolvingMo)}/мес</strong>` : ''}
+      ${pausedCount > 0 ? ` · ⏸ На паузе: <strong>${pausedCount}</strong>` : ''}
+    </div>
+    ${totalDebt > 0 ? `<div style="font-size:13px;color:var(--muted)">Общий долг (включая паузы): ${fmt(totalDebt)}</div>` : ''}
     <div style="font-size:12px;margin-top:10px;color:${ratioColor};line-height:1.5">${verdict}</div>`;
+}
+
+// Переключить кредит пауза/активен (только для кредиток)
+function toggleCreditPause(id) {
+  const c = state.credits.find(x => x.id === id);
+  if (!c) return;
+  if (c.kind !== 'revolving') {
+    alert('На паузу можно ставить только кредитки. Обязательные кредиты — с %, их нельзя «забыть».');
+    return;
+  }
+  c.paused = !c.paused;
+  save(); renderAll();
+  toast(c.paused ? `⏸ «${c.name}» на паузе` : `▶️ «${c.name}» снова активна`, c.paused ? 'warn' : 'good');
+}
+
+// Переключить тип (mandatory ↔ revolving)
+function toggleCreditKind(id) {
+  const c = state.credits.find(x => x.id === id);
+  if (!c) return;
+  if (c.kind === 'revolving') {
+    if (!confirm(`Сделать «${c.name}» обязательным кредитом? Он перестанет быть паузным, попадёт в план платежей.`)) return;
+    c.kind = 'mandatory';
+    c.paused = false;
+  } else {
+    if (!confirm(`Сделать «${c.name}» кредиткой? Его можно будет ставить на паузу.`)) return;
+    c.kind = 'revolving';
+  }
+  save(); renderAll();
 }
 
 // ===== RENDER GOALS =====
@@ -5422,13 +5906,16 @@ function applyImportAsHistory() {
     if (seen.has(key)) { skipped++; return; }
     seen.add(key);
 
+    const tType = r.type || 'expense';
     state.transactions.push({
       id: safeId(),
       date: r.date,
-      name: name || (r.type === 'income' ? 'Поступление' : 'Операция'),
+      name: name || (tType === 'income' ? 'Поступление' : 'Операция'),
       amount: r.amount,
-      cat: r.cat || (r.type === 'income' ? '💰 Доход' : autoCategorize(name)),
-      type: r.type || 'expense'
+      cat: r.cat || (tType === 'income' ? '💰 Доход' : autoCategorize(name)),
+      type: tType,
+      // Авто-помечаем «плохое» по ключевым словам — пользователь потом может снять вручную
+      bad: tType === 'expense' ? detectBadName(name) : false
     });
     if (r.type === 'income') addedInc++;
     else addedExp++;
@@ -5475,6 +5962,7 @@ function renderAll() {
   refreshIncomeEarmarkSelect();
   refreshTransactionBalanceSelect();
   refreshCreditBalanceSelect();
+  refreshConvertSelects();
   updateIncomeScheduleFields();
   updateCreditScheduleFields();
   if (typeof renderV2 === 'function') renderV2();
