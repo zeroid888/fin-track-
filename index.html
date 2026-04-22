@@ -317,6 +317,26 @@
   }
   .delete-btn:hover { color: var(--accent2); }
 
+  /* BAD-SPENDING QUICK CHIPS */
+  .bad-chip {
+    background: #1a1420;
+    border: 1px solid #4a2633;
+    color: #ff9aa8;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 7px 12px;
+    border-radius: 16px;
+    transition: all 0.15s;
+    font-family: inherit;
+  }
+  .bad-chip:hover { background: #2a1a24; border-color: #ff5a5a; color: #ff5a5a; }
+  .bad-chip:active { transform: scale(0.96); }
+  .bad-row-on {
+    background: #2a1820 !important;
+    border-color: #ff5a5a !important;
+    box-shadow: 0 0 0 1px #ff5a5a inset;
+  }
+
   /* GOALS */
   .goal-card {
     background: var(--surface);
@@ -1099,9 +1119,21 @@
       <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">Если выбрать кошелёк, сумма сразу уменьшит его остаток. При удалении операции остаток вернётся.</div>
     </div>
     <div class="form-group">
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
-        <input id="tx-bad" type="checkbox" style="width:18px;height:18px;accent-color:#ff5a5a">
-        <span>🚫 Плохая трата — то, что не хотел, но потратил</span>
+      <label style="font-size:12px;color:var(--muted);margin-bottom:6px;display:block">🚫 Быстро пометить «плохую» трату</label>
+      <div id="tx-bad-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+        <button type="button" class="bad-chip" onclick="applyBadChip('🍺 Алкоголь','🎮 Развлечения')">🍺 Алкоголь</button>
+        <button type="button" class="bad-chip" onclick="applyBadChip('🚬 Сигареты','💊 Здоровье')">🚬 Сигареты</button>
+        <button type="button" class="bad-chip" onclick="applyBadChip('💨 Вейп/кальян','💊 Здоровье')">💨 Вейп/кальян</button>
+        <button type="button" class="bad-chip" onclick="applyBadChip('🍔 Фастфуд','🍔 Еда')">🍔 Фастфуд</button>
+        <button type="button" class="bad-chip" onclick="applyBadChip('🍫 Сладкое','🍔 Еда')">🍫 Сладкое</button>
+        <button type="button" class="bad-chip" onclick="applyBadChip('🥤 Энергетики','🍔 Еда')">🥤 Энергетики</button>
+        <button type="button" class="bad-chip" onclick="applyBadChip('🎰 Ставки/казино','🎮 Развлечения')">🎰 Ставки</button>
+        <button type="button" class="bad-chip" onclick="applyBadChip('🍸 Бар/клуб','🎮 Развлечения')">🍸 Бар</button>
+      </div>
+      <label id="tx-bad-row" style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:#1a1420;transition:all 0.15s">
+        <input id="tx-bad" type="checkbox" style="width:20px;height:20px;accent-color:#ff5a5a" onchange="syncTxBadRow()">
+        <span style="font-weight:600">🚫 Плохая трата</span>
+        <span style="font-size:11px;color:var(--muted);margin-left:auto">учтётся в «🚫 Плохие траты»</span>
       </label>
       <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
         Алкоголь, наркотики, сигареты, кальян, фастфуд, импульсивный шоппинг — всё, от чего хочется избавиться. В конце месяца увидишь, сколько на это ушло, и поймёшь масштаб.
@@ -1622,6 +1654,7 @@ function load() {
         if (typeof g.target !== 'number') g.target = parseAmount(g.target) || 0;
         if (typeof g.monthly !== 'number') g.monthly = parseAmount(g.monthly) || 0;
         if (!g.deadline || typeof g.deadline !== 'string' || !/^\d{4}-\d{2}$/.test(g.deadline)) g.deadline = null;
+        if (typeof g.paused !== 'boolean') g.paused = false;
       });
       state.habits.forEach(h => {
         if (!h.id) h.id = safeId();
@@ -1716,7 +1749,18 @@ function mandatoryCreditsMonthly() {
   return activeCredits().filter(c => c.kind !== 'revolving')
     .reduce((s, c) => s + creditMonthlyEq(c), 0);
 }
-function totalGoalsMonthly() { return state.goals.reduce((s, g) => s + (g.monthly || 0), 0); }
+// Цели на паузе (g.paused) не резервируют месячный взнос — не влияют на дневной бюджет и план.
+function totalGoalsMonthly() {
+  return state.goals.reduce((s, g) => s + (g.paused ? 0 : (g.monthly || 0)), 0);
+}
+function toggleGoalPause(id) {
+  const g = state.goals.find(x => x.id === id);
+  if (!g) return;
+  g.paused = !g.paused;
+  save();
+  renderAll();
+  toast(g.paused ? `⏸ «${g.name}» на паузе — не резервируем взнос` : `▶️ «${g.name}» снова в работе`);
+}
 // ===== EARMARKED INCOME =====
 // Доход, зарезервированный под конкретный расход (BitZone → Квартира),
 // не распыляется на цели / дневной бюджет.
@@ -1875,10 +1919,15 @@ function incomeScheduleForMonth(income, year, monthIndex) {
   const pushEvent = (day) => {
     const safeDay = clampToMonthDay(year, monthIndex, day);
     const dateObj = new Date(year, monthIndex, safeDay);
+    // amount хранится в рублях (для всего downstream: план, календарь, дневной бюджет),
+    // rawAmount и currency остаются на случай, если где-то нужно показать в исходной валюте.
     result.push({
       incomeId: income.id,
       incomeName: income.name,
-      amount: income.amount || 0,
+      amount: toRub(income.amount || 0, income.currency || 'RUB'),
+      rawAmount: income.amount || 0,
+      currency: income.currency || 'RUB',
+      freq,
       dateObj,
       date: `${dateObj.getFullYear()}-${String(dateObj.getMonth()+1).padStart(2,'0')}-${String(dateObj.getDate()).padStart(2,'0')}`
     });
@@ -2005,18 +2054,23 @@ function upcomingEvents(daysAhead = 14) {
     const y = mDate.getFullYear();
     const mi = mDate.getMonth();
 
-    // Доходы
+    // Доходы — amount всегда в ₽, чтобы USD-инкам (Bulldrop) не отображались сырой суммой
     state.incomes.forEach(inc => {
       const schedule = incomeScheduleForMonth(inc, y, mi);
       schedule.forEach(ev => {
         if (ev.dateObj >= today && ev.dateObj <= until) {
+          const amountRub = toRub(inc.amount || 0, inc.currency || 'RUB');
+          const curSfx = (inc.currency && inc.currency !== 'RUB')
+            ? ` (${inc.currency === 'USDT' ? '₮' : '$'}${fmt(inc.amount || 0)})`
+            : '';
           events.push({
             date: ev.date,
             dateObj: ev.dateObj,
             kind: 'income',
-            name: inc.name,
-            amount: inc.amount,
-            icon: '💰'
+            name: inc.name + curSfx,
+            amount: amountRub,
+            icon: '💰',
+            currency: inc.currency || 'RUB'
           });
         }
       });
@@ -2107,8 +2161,13 @@ function getCashflowSnapshot() {
 
   const plannedIncomeThisMonth = monthEvents.reduce((s, e) => s + e.amount, 0);
   const receivedEvents = monthEvents.filter(e => e.date <= todayIso());
-  const nextEventThisMonth = monthEvents.find(e => e.date > todayIso()) || null;
-  const nextEvent = nextEventThisMonth || nextMonthEvents[0] || null;
+  // «План по ближайшей выплате» должен опираться только на стабильную зарплату,
+  // а не на ежедневный/недельный капающий доход (иначе Bitzone 30₽/день становится «выплатой»).
+  const isStablePay = (ev) => ['monthly', 'semimonthly', 'yearly'].includes(ev.freq);
+  const stableMonthEvents = monthEvents.filter(isStablePay);
+  const stableNextMonthEvents = nextMonthEvents.filter(isStablePay);
+  const nextEventThisMonth = stableMonthEvents.find(e => e.date > todayIso()) || null;
+  const nextEvent = nextEventThisMonth || stableNextMonthEvents[0] || null;
 
   const receivedIncome = receivedEvents.reduce((s, e) => s + e.amount, 0);
   const actualDailyNet = totalTransactionExpenses() - totalTransactionIncome();
@@ -3041,6 +3100,7 @@ function addTransaction() {
     document.getElementById('tx-cat').value = '🍔 Еда';
     document.getElementById('tx-balance').value = '';
     if (badEl) badEl.checked = false;
+    if (typeof syncTxBadRow === 'function') syncTxBadRow();
     renderAll();
   } catch (e) { console.error(e); alert('Ошибка: ' + e.message); }
 }
@@ -4873,6 +4933,32 @@ function toggleTxBad(id) {
   save(); renderAll();
 }
 
+// Подсветка ряда чекбокса «плохая трата» — визуальный сигнал, что метка активна.
+function syncTxBadRow() {
+  const row = document.getElementById('tx-bad-row');
+  const bad = document.getElementById('tx-bad');
+  if (!row || !bad) return;
+  row.classList.toggle('bad-row-on', !!bad.checked);
+}
+
+// Быстрый чип: подставляет название и категорию, включает метку «плохая трата»
+// и ставит фокус в поле суммы — чтобы оставалось только вбить цифру.
+function applyBadChip(name, cat) {
+  const n = document.getElementById('tx-name');
+  const c = document.getElementById('tx-cat');
+  const b = document.getElementById('tx-bad');
+  const a = document.getElementById('tx-amount');
+  if (n) n.value = name;
+  if (c && cat) {
+    // Ищем опцию по значению, если нет — оставляем текущую
+    const opt = Array.from(c.options || []).find(o => o.value === cat);
+    if (opt) c.value = cat;
+  }
+  if (b) b.checked = true;
+  syncTxBadRow();
+  if (a) { a.focus(); a.select && a.select(); }
+}
+
 // Переключить статус «плохой расход» у регулярного расхода
 function toggleExpenseBad(id) {
   const e = state.expenses.find(x => x.id === id);
@@ -5089,14 +5175,21 @@ function renderGoals() {
       }
     }
 
-    html += `<div class="goal-card">
+    const pausedBadge = g.paused
+      ? '<span style="display:inline-block;margin-left:6px;padding:2px 8px;border-radius:10px;background:#332a15;color:#ff9f4f;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">⏸ пауза</span>'
+      : '';
+    const pauseBtn = g.paused
+      ? `<button class="delete-btn" onclick="toggleGoalPause('${g.id}')" title="Возобновить цель" style="color:var(--accent)">▶</button>`
+      : `<button class="delete-btn" onclick="toggleGoalPause('${g.id}')" title="Поставить цель на паузу">⏸</button>`;
+    html += `<div class="goal-card" style="${g.paused ? 'opacity:0.65' : ''}">
       <div class="goal-header">
         <div>
-          <div class="goal-name">${g.name}</div>
+          <div class="goal-name">${g.name}${pausedBadge}</div>
           ${subLine ? `<div style="font-size:12px;color:var(--muted);margin-top:4px">${subLine}</div>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           <span style="font-size:28px">${g.emoji}</span>
+          ${pauseBtn}
           <button class="delete-btn" onclick="editGoalSaved('${g.id}')" title="Изменить накоплено">✎</button>
           <button class="delete-btn" onclick="deleteGoal('${g.id}')">✕</button>
         </div>
@@ -6739,11 +6832,23 @@ setTimeout(() => {
 // Обратная совместимость — если где-то остался старый вызов
 function showPendingDeductionsPrompt() { return showPendingEventsPrompt(); }
 
-function showPendingEventsPrompt() {
+function showPendingEventsPrompt(opts) {
+  const force = opts && opts.force;
   const pendingIncomes = (typeof findPendingIncomes === 'function') ? findPendingIncomes() : [];
   const pendingDeductions = findPendingDeductions();
   const pendingCredits = (typeof findPendingCreditDeductions === 'function') ? findPendingCreditDeductions() : [];
   if (!pendingIncomes.length && !pendingDeductions.length && !pendingCredits.length) return;
+
+  // Троттлинг: модалка раздражает при каждом входе. Показываем автоматически не чаще
+  // одного раза в день. При ручном вызове (кнопка) — всегда.
+  if (!force) {
+    try {
+      const todayKey = todayIso();
+      const lastShown = localStorage.getItem('pendingPromptLastShown');
+      if (lastShown === todayKey) return;
+      localStorage.setItem('pendingPromptLastShown', todayKey);
+    } catch (e) { /* ignore localStorage errors */ }
+  }
 
   const host = document.getElementById('pending-events-modal') || (() => {
     const d = document.createElement('div');
