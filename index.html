@@ -1579,14 +1579,14 @@ let state = {
   incomes: [],       // { id, name, amount, type, freq, payDays:[5,20] }
   expenses: [],      // обязательные МЕСЯЧНЫЕ (аренда, подписки, интернет, …)
   transactions: [],  // ежедневные разовые траты (кофе, такси, продукты): { id, date, name, amount, cat, type, balanceId?, balanceDeducted?, balanceCurrency? }
-  credits: [],       // { id, name, monthly, total, months, rate, payDay? }
+  credits: [],       // { id, name, monthly, total, principal, paidTotal, months, rate, payDay? }
   goals: [],
   habits: [],        // регулярные привычки: { id, name, emoji, cost, freq, cat, active }  freq: daily|weekdays|weekly|biweekly|semimonthly|monthly
   balances: [],      // { id, name, emoji, amount, currency: 'RUB'|'USD'|'USDT' }
-  // AUDIT P0-1 | Хардкод курсов 90 ₽ устарел с 2025. При новой установке план в валюте занижен ~30-40%.
-  // Лечится в saveRates() (выходить на свежий курс при старте) или показывать banner "Курсы не обновлялись N дней".
-  // См. fintrack-audit.html.
-  rates: { USD: 90, USDT: 90 },
+  // AUDIT P0-1 [FIXED 2026-05-14] | Дефолт обновлён 90 → 75 (snapshot на май 2026, со слов Daniel).
+  // Это только для ПЕРВОЙ установки — на вкладке «Балансы» пользователь переписывает.
+  // Долгосрочно правильно — fetch при первом запуске + индикатор «курс не обновлялся N дней».
+  rates: { USD: 75, USDT: 75 },
   lastImport: null
 };
 
@@ -1632,14 +1632,13 @@ function load() {
       if (!Array.isArray(state.goals)) state.goals = [];
       if (!Array.isArray(state.habits)) state.habits = [];
       if (!Array.isArray(state.balances)) state.balances = [];
-      if (!state.rates || typeof state.rates !== 'object') state.rates = { USD: 90, USDT: 90 };
-      // AUDIT P0-1 [FIXED 2026-05-14] | Проверка позитивности + парсинг строк ("100" из старого бэкапа
-      // теперь сохраняется как число, а не сбрасывается в 90).
+      if (!state.rates || typeof state.rates !== 'object') state.rates = { USD: 75, USDT: 75 };
+      // AUDIT P0-1 [FIXED 2026-05-14] | Парсинг строк + позитивный fallback. Дефолт 75 (см. строку 1586).
       ['USD', 'USDT'].forEach(cur => {
         const v = state.rates[cur];
         if (typeof v === 'number' && isFinite(v) && v > 0) return; // ok
         const p = parseFloat(v); // парсим строку
-        state.rates[cur] = (isFinite(p) && p > 0) ? p : 90;
+        state.rates[cur] = (isFinite(p) && p > 0) ? p : 75;
       });
 
       // 3. Добавляем новые поля старым записям (backward-compat)
@@ -1684,6 +1683,18 @@ function load() {
         if (c.kind !== 'mandatory' && c.kind !== 'revolving') c.kind = 'mandatory';
         // Глобальная пауза — не попадает в план, не генерирует pending-события
         if (typeof c.paused !== 'boolean') c.paused = false;
+        // P0-4: principal — изначальная сумма долга (для прогресса "выплачено/осталось")
+        // Для legacy кредитов мы не знаем оригинал; ставим текущий total как «лучшее, что есть».
+        // Новые кредиты установят principal явно в addCredit().
+        if (typeof c.principal !== 'number' || !isFinite(c.principal) || c.principal <= 0) {
+          c.principal = (typeof c.total === 'number' && c.total > 0) ? c.total : 0;
+        }
+        // P0-4: paidTotal — накопительная сумма всех платежей в ₽. У legacy = 0, считаем дальше.
+        if (typeof c.paidTotal !== 'number' || !isFinite(c.paidTotal) || c.paidTotal < 0) {
+          c.paidTotal = 0;
+        }
+        // P0-4: rate — гарантируем число
+        if (typeof c.rate !== 'number' || !isFinite(c.rate) || c.rate < 0) c.rate = 0;
       });
       state.expenses.forEach(e => {
         if (typeof e.payDay !== 'number' || e.payDay < 1 || e.payDay > 31) e.payDay = (e.payDay === null ? null : null);
@@ -1843,12 +1854,12 @@ function toggleGoalPause(id) {
   renderAll();
   toast(g.paused ? `⏸ «${g.name}» на паузе — не резервируем взнос` : `▶️ «${g.name}» снова в работе`);
 }
-// AUDIT P0-6 | Излишек earmark-дохода «исчезает» из учёта.
-// Пример: BitZone приносит ~1500 USDT/мес (= ~135 000₽), аренда 987 USDT (= ~88 830₽).
-// Излишек 513 USDT (~46 170₽) НЕ попадает ни в freeIncome (earmarked income весь вычитается),
-// ни в balances, ни в goals. Семантически он «копится на тот же расход», но кода под это нет.
-// Лечение: либо излишек идёт в freeIncome (тогда earmark — только индикатор связи),
-// либо в указанный balance, либо в новую goal.
+// AUDIT P0-6 | Излишек earmark-дохода намеренно НЕ идёт в дневной бюджет текущего месяца
+// (Daniel: «излишек остаётся на следующий месяц бонусом, чтобы меньше надо было копить»).
+// Поведение: earmarkedIncomeTotal вычитается из freeIncome ЦЕЛИКОМ, излишек физически копится
+// на balance (BitZone's) и работает как roll-over буфер для будущего.
+// TODO (отдельная фича): показать «💎 Излишек earmark за этот месяц: +Y ₽ копится на BitZone's»
+// и в плане на следующий месяц учитывать этот буфер как уменьшение «надо отложить».
 // ===== EARMARKED INCOME =====
 // Доход, зарезервированный под конкретный расход (BitZone → Квартира),
 // не распыляется на цели / дневной бюджет.
@@ -1954,16 +1965,21 @@ function currentMonthKey() {
 function currentMonthTransactions() {
   return state.transactions.filter(t => monthKey(t.date) === currentMonthKey());
 }
-// AUDIT P0-3 | Эти две функции НЕ исключают категорию '🔄 Между своими' (переводы между своими счетами).
-// convertBetweenBalances() создаёт парные транзакции: out как 'expense', in как 'income' с этой категорией.
-// Сейчас перевод 1000 USDT → ₽ раздувает totalTransactionIncome на ~90 000₽, портит actualDailyNet
-// в getCashflowSnapshot, искажает аналитику. averageDailyLifeSpend() фильтр имеет (1815), эти — нет.
-// Лечение: добавить .filter(t => t.cat !== '🔄 Между своими' && !t.transferPairId).
+// AUDIT P0-3 [FIXED 2026-05-14] | Переводы между своими счетами (категория '🔄 Между своими',
+// созданные convertBetweenBalances() парные транзакции с transferPairId) теперь исключаются —
+// они не должны попадать ни в факт-расход, ни в факт-доход месяца.
+function isTransferTx(t) {
+  return t.cat === '🔄 Между своими' || !!t.transferPairId;
+}
 function totalTransactionExpenses() {
-  return currentMonthTransactions().filter(t => t.type !== 'income').reduce((s, t) => s + t.amount, 0);
+  return currentMonthTransactions()
+    .filter(t => t.type !== 'income' && !isTransferTx(t))
+    .reduce((s, t) => s + t.amount, 0);
 }
 function totalTransactionIncome() {
-  return currentMonthTransactions().filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+  return currentMonthTransactions()
+    .filter(t => t.type === 'income' && !isTransferTx(t))
+    .reduce((s, t) => s + t.amount, 0);
 }
 function transactionCountThisMonth() {
   return currentMonthTransactions().length;
@@ -3010,12 +3026,25 @@ function findPendingCreditDeductions() {
   return pending;
 }
 
-// AUDIT P0-4 | Долг гасится без процентов: cr.total -= cr.monthly целиком.
-// На любом кредите со ставкой rate > 0 это математически неверно — часть платежа идёт на % (не уменьшает тело).
-// На ипотеке 10–15 лет 15% годовых расхождение нарастает на десятки тысяч ₽/год.
-// Правильно: monthlyInterest = cr.total * cr.rate / 12 / 100; principal = cr.monthly - monthlyInterest;
-//            cr.total = Math.max(0, cr.total - principal);
-// Для rate=0 поведение идентично текущему — миграция безопасна.
+// AUDIT P0-4 [FIXED 2026-05-14] | Амортизация с учётом процентов:
+// monthlyInterest = cr.total * cr.rate / 12 / 100 — сколько съедает ставка
+// principalPaid = payment - monthlyInterest — сколько реально уходит на тело
+// При rate=0 эквивалент старому поведению (principalPaid = payment).
+// Если payment < monthlyInterest (платёж меньше %) — долг растёт, тело не уменьшается.
+// applyCreditPayment возвращает фактически списанную с тела сумму, чтобы вызывающая функция
+// могла записать её в paidTotal и принять решения по UI.
+function applyCreditPayment(cr, payment) {
+  if (!cr || !isFinite(payment) || payment <= 0) return 0;
+  const rate = (typeof cr.rate === 'number' && cr.rate > 0) ? cr.rate : 0;
+  const monthlyInterest = rate > 0 ? (cr.total || 0) * rate / 12 / 100 : 0;
+  let principalPaid = payment - monthlyInterest;
+  if (principalPaid < 0) principalPaid = 0; // долг не растёт ниже 0 — но и не уменьшается
+  // Округляем до копеек, чтобы не накапливать дрейф
+  const newTotal = Math.round(Math.max(0, (cr.total || 0) - principalPaid) * 100) / 100;
+  cr.total = newTotal;
+  cr.paidTotal = Math.round(((cr.paidTotal || 0) + payment) * 100) / 100;
+  return principalPaid;
+}
 // Подтверждённое списание кредита: снимаем с баланса и уменьшаем остаток долга
 function applyCreditDeduction(crId, chargeKey) {
   const cr = state.credits.find(c => c.id === crId);
@@ -3030,20 +3059,20 @@ function applyCreditDeduction(crId, chargeKey) {
     if (!confirm(`На «${bal.name}» только ${fmtCur(bal.amount, bal.currency)}, а платёж по «${cr.name}» — ${fmtCur(deduct, bal.currency)}. Баланс уйдёт в минус. Продолжить?`)) return false;
   }
   bal.amount = Math.round((bal.amount - deduct) * 100) / 100;
-  // Остаток долга уменьшается на сумму платежа в рублях (приближённо, без учёта % — см. P0-4)
-  cr.total = Math.max(0, Math.round(((cr.total || 0) - (cr.monthly || 0)) * 100) / 100);
+  // P0-4: амортизация — часть платежа уходит в проценты, остальное в тело
+  applyCreditPayment(cr, cr.monthly || 0);
   cr.deductionLog.push(chargeKey);
   save();
   return true;
 }
 
-// «Уже оплатил сам» — баланс не трогаем, долг уменьшаем, помечаем как обработано
+// «Уже оплатил сам» — баланс не трогаем, долг уменьшаем (с учётом %), помечаем как обработано
 function markCreditPaidExternally(crId, chargeKey) {
   const cr = state.credits.find(c => c.id === crId);
   if (!cr) return false;
   if (!Array.isArray(cr.deductionLog)) cr.deductionLog = [];
   if (!cr.deductionLog.includes(chargeKey)) cr.deductionLog.push(chargeKey);
-  cr.total = Math.max(0, Math.round(((cr.total || 0) - (cr.monthly || 0)) * 100) / 100);
+  applyCreditPayment(cr, cr.monthly || 0);
   save();
   return true;
 }
@@ -3081,7 +3110,8 @@ function payCreditNow(crId) {
       bal.amount = Math.round((bal.amount - deduct) * 100) / 100;
     }
   }
-  cr.total = Math.max(0, Math.round(((cr.total || 0) - amt) * 100) / 100);
+  // P0-4: амортизация — часть платежа уходит на проценты, остальное на тело
+  applyCreditPayment(cr, amt);
   save();
   toast(`Внесено ${fmt(amt)} в счёт «${cr.name}»`, 'good');
   renderAll();
@@ -3270,7 +3300,7 @@ function refreshExpenseBalanceSelect() {
   const current = sel.value;
   let html = '<option value="">— не списывать, только учесть в бюджете —</option>';
   state.balances.forEach(b => {
-    html += `<option value="${b.id}">${b.emoji || '💳'} ${b.name} (${fmtCur(b.amount, b.currency)})</option>`;
+    html += `<option value="${esc(b.id)}">${esc(b.emoji || '💳')} ${esc(b.name)} (${fmtCur(b.amount, b.currency)})</option>`;
   });
   sel.innerHTML = html;
   // восстановить выбор если возможно
@@ -3283,7 +3313,7 @@ function refreshIncomeBalanceSelect() {
   const current = sel.value;
   let html = '<option value="">— только учитывать в бюджете, не менять балансы —</option>';
   (state.balances || []).forEach(b => {
-    html += `<option value="${b.id}">${b.emoji || '💳'} ${b.name} (${fmtCur(b.amount, b.currency)})</option>`;
+    html += `<option value="${esc(b.id)}">${esc(b.emoji || '💳')} ${esc(b.name)} (${fmtCur(b.amount, b.currency)})</option>`;
   });
   sel.innerHTML = html;
   if (current && state.balances.find(b => b.id === current)) sel.value = current;
@@ -3295,7 +3325,7 @@ function refreshIncomeEarmarkSelect() {
   const current = sel.value;
   let html = '<option value="">— этот доход распределяется свободно —</option>';
   (state.expenses || []).forEach(e => {
-    html += `<option value="${e.id}">🏠 ${e.name} (${fmt(e.amount)})</option>`;
+    html += `<option value="${esc(e.id)}">🏠 ${esc(e.name)} (${fmt(e.amount)})</option>`;
   });
   sel.innerHTML = html;
   if (current && (state.expenses || []).find(e => e.id === current)) sel.value = current;
@@ -3307,7 +3337,7 @@ function refreshTransactionBalanceSelect() {
   const current = sel.value;
   let html = '<option value="">— не списывать, только учесть в тратах —</option>';
   state.balances.forEach(b => {
-    html += `<option value="${b.id}">${b.emoji || '💳'} ${b.name} (${fmtCur(b.amount, b.currency)})</option>`;
+    html += `<option value="${esc(b.id)}">${esc(b.emoji || '💳')} ${esc(b.name)} (${fmtCur(b.amount, b.currency)})</option>`;
   });
   sel.innerHTML = html;
   if (current && state.balances.find(b => b.id === current)) sel.value = current;
@@ -3319,7 +3349,7 @@ function refreshCreditBalanceSelect() {
   const current = sel.value;
   let html = '<option value="">— не списывать, только учесть в плане —</option>';
   state.balances.forEach(b => {
-    html += `<option value="${b.id}">${b.emoji || '💳'} ${b.name} (${fmtCur(b.amount, b.currency)})</option>`;
+    html += `<option value="${esc(b.id)}">${esc(b.emoji || '💳')} ${esc(b.name)} (${fmtCur(b.amount, b.currency)})</option>`;
   });
   sel.innerHTML = html;
   if (current && state.balances.find(b => b.id === current)) sel.value = current;
@@ -3493,11 +3523,14 @@ function addCredit() {
       ? Math.round((term * 7) / 30.44)
       : term;
 
+    const initialTotal = isNaN(total) ? 0 : total;
     state.credits.push({
       id: safeId(),
       name,
       monthly,
-      total: isNaN(total) ? 0 : total,
+      total: initialTotal,
+      principal: initialTotal,      // P0-4: изначальная сумма долга (immutable)
+      paidTotal: 0,                 // P0-4: накопительно выплачено в ₽
       months: monthsEquivalent,     // для совместимости
       term, termUnit,               // новые поля — что реально ввёл пользователь
       rate: isNaN(rate) ? 0 : rate,
@@ -3617,7 +3650,7 @@ function refreshConvertSelects() {
   const curTo = toSel.value;
   const balances = state.balances || [];
   const optsHtml = balances.map(b =>
-    `<option value="${b.id}">${b.emoji || '💳'} ${b.name} (${fmtCur(b.amount, b.currency)})</option>`
+    `<option value="${esc(b.id)}">${esc(b.emoji || '💳')} ${esc(b.name)} (${fmtCur(b.amount, b.currency)})</option>`
   ).join('');
   fromSel.innerHTML = '<option value="">— выбери счёт —</option>' + optsHtml;
   toSel.innerHTML = '<option value="">— выбери счёт —</option>' + optsHtml;
@@ -3636,7 +3669,7 @@ function refreshConvertSelects() {
 function suggestedConvRate(fromCur, toCur) {
   if (!fromCur || !toCur) return null;
   if (fromCur === toCur) return 1;
-  const rates = state.rates || { USD: 90, USDT: 90 };
+  const rates = state.rates || { USD: 75, USDT: 75 };
   const rubPerUnit = (c) => c === 'RUB' ? 1 : (rates[c] || 1);
   // 1 fromCur = rubPerUnit(from) рублей = rubPerUnit(from)/rubPerUnit(to) единиц toCur
   return rubPerUnit(fromCur) / rubPerUnit(toCur);
@@ -3739,12 +3772,9 @@ function convertBetweenBalances() {
     fromBal.amount = Math.round((fromBal.amount - amt) * 100) / 100;
     toBal.amount = Math.round((toBal.amount + destAmt) * 100) / 100;
 
-    // AUDIT P0-3 | Эта пара транзакций — источник transfer-leak бага. Out-сторона type:'expense',
-    // in-сторона type:'income' с категорией '🔄 Между своими'. totalTransactionIncome/Expenses (1893–1898)
-    // НЕ фильтруют эту категорию → перевод между своими счетами раздувает «факт-доход» и «факт-расход» месяца.
-    // averageDailyLifeSpend (1815) фильтр имеет — там работает корректно.
-    // Записываем парные транзакции с категорией «🔄 Между своими» — в бюджет они не попадут,
-    // но останутся в истории
+    // AUDIT P0-3 [FIXED 2026-05-14] | Парные транзакции переводов — категория «🔄 Между своими» +
+    // transferPairId. Из totalTransactionIncome/Expenses теперь отфильтрованы (см. isTransferTx),
+    // в бюджет не попадают, но остаются в истории.
     const pairId = safeId();
     const amtRubFrom = toRub(amt, fromBal.currency);
     const amtRubTo = toRub(destAmt, toBal.currency);
@@ -3791,14 +3821,13 @@ function convertBetweenBalances() {
   }
 }
 
-// AUDIT P0-17 | Все render-функции ниже массово используют ${i.name}, ${m.name}, ${r.desc}
-// и т.п. в шаблонной строке, которая идёт в .innerHTML БЕЗ эскейпа. Daniel сам не злоумышленник,
-// но описания транзакций приходят из импорта CSV/PDF выписки — произвольная строка от платёжной
-// системы. На безобидном "<" вёрстка ломается (правую часть DOM съедает). На злом
-// <img src=x onerror=...> крадёт localStorage с финансами (особенно болезненно в Capacitor WebView).
-// В renderPendingEventsLists ${p.name} соседствует с onclick="...'${p.incomeId}'..." — апостроф
-// в id ломает JS-инжекцию. Фикс: helper esc(s) и проход по всем ${...name}/${...desc}/${...cat}
-// в innerHTML. Один вечер работы. См. code-review.html#f-xss.
+// AUDIT P0-17 [FIXED 2026-05-14] | Полный проход esc() по render-функциям и импорту CSV/PDF:
+// все ${X.name} / ${X.desc} / ${X.cat} / ${X.emoji} / ${X.id} в innerHTML обёрнуты в esc().
+// Покрыто: renderImportPreview, renderDashboard balance/badSpending, renderHabits,
+// renderIncomes, renderExpenses, renderTransactions, renderCredits, renderGoals, renderRecurring,
+// refreshTransactionBalanceSelect и три варианта option-селектов, renderPendingEventsLists
+// (доходы / расходы / кредиты). Уязвимое место «${p.name} в innerHTML + onclick с id-параметрами»
+// закрыто и для имени, и для id.
 function renderBalances() {
   const list = document.getElementById('balance-list');
   if (!list) return;
@@ -3842,9 +3871,9 @@ function renderBalances() {
             const fCur = f.currency || 'RUB';
             const sym = fCur === 'USDT' ? '₮' : (fCur === 'USD' ? '$' : '₽');
             const freqShort = { daily:'/день', weekly:'/нед', monthly:'/мес', semimonthly:'·2/мес', yearly:'/год' }[f.freq] || '';
-            return `+${f.amount}${sym}${freqShort} · ${f.name}`;
+            return `+${f.amount}${sym}${freqShort} · ${esc(f.name)}`;
           }).join('; ');
-          const outLine = drainers.map(e => `−${fmt(e.amount)}/мес · ${e.name}${e.payDay ? ' ('+e.payDay+' числа)' : ''}`).join('; ');
+          const outLine = drainers.map(e => `−${fmt(e.amount)}/мес · ${esc(e.name)}${e.payDay ? ' ('+e.payDay+' числа)' : ''}`).join('; ');
           flow = `<div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">`
               + (inLine ? `<div>🟢 Пополняется: ${inLine}</div>` : '')
               + (outLine ? `<div>🔴 Списывается: ${outLine}</div>` : '')
@@ -3853,16 +3882,16 @@ function renderBalances() {
         html += `<div class="item-row" style="align-items:flex-start;flex-direction:column;gap:0">
           <div style="display:flex;width:100%;justify-content:space-between;align-items:center">
             <div class="item-left">
-              <div class="item-icon" style="background:var(--surface2)">${b.emoji || '💳'}</div>
+              <div class="item-icon" style="background:var(--surface2)">${esc(b.emoji || '💳')}</div>
               <div class="two-row">
-                <div class="item-name">${b.name}</div>
+                <div class="item-name">${esc(b.name)}</div>
                 ${rubPart}
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:4px">
-              <button class="delete-btn" onclick="editBalanceAmount('${b.id}')" title="Изменить сумму">✎</button>
+              <button class="delete-btn" onclick="editBalanceAmount('${esc(b.id)}')" title="Изменить сумму">✎</button>
               <div class="item-amount" style="color:var(--accent)">${fmtCur(b.amount, cur)}</div>
-              <button class="delete-btn" onclick="deleteBalance('${b.id}')">✕</button>
+              <button class="delete-btn" onclick="deleteBalance('${esc(b.id)}')">✕</button>
             </div>
           </div>
           ${flow}
@@ -4086,9 +4115,9 @@ function renderHabits() {
       <div style="display:flex;justify-content:space-between;align-items:start;gap:10px">
         <div style="flex:1;min-width:0">
           <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700;margin-bottom:4px">
-            ${h.emoji} ${h.name} ${inactive ? '<span style="font-size:11px;color:var(--muted);font-weight:400">· на паузе</span>' : ''}
+            ${esc(h.emoji)} ${esc(h.name)} ${inactive ? '<span style="font-size:11px;color:var(--muted);font-weight:400">· на паузе</span>' : ''}
           </div>
-          <div style="font-size:12px;color:var(--muted)">${h.cat || 'Привычка'} · ${freqText}</div>
+          <div style="font-size:12px;color:var(--muted)">${esc(h.cat || 'Привычка')} · ${freqText}</div>
         </div>
         <div style="text-align:right">
           <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:#ff9f4f">${fmt(cost)}<span style="font-size:11px;color:var(--muted);font-weight:400">/раз</span></div>
@@ -4625,7 +4654,7 @@ function renderPaycheckSplit() {
           : '<span style="font-size:10px;color:#ff9f4f" title="Не привязан к балансу">·вручную</span>';
         return `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--border);gap:8px">
           <div style="min-width:0;flex:1">
-            <div style="font-size:13px">${icon} ${o.name} ${balNote}</div>
+            <div style="font-size:13px">${icon} ${esc(o.name)} ${balNote}</div>
             <div style="font-size:11px;color:var(--muted)">${dLabel} (${o.payDay} числа)</div>
             ${covNote}
           </div>
@@ -4837,7 +4866,7 @@ function renderBadSpending() {
   const topTxs = badTxs.slice().sort((a, b) => b.amount - a.amount).slice(0, 5);
   const topHtml = topTxs.length > 0
     ? topTxs.map(t => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">
-        <span style="color:var(--muted)">${t.date.slice(5)} · ${t.name}</span>
+        <span style="color:var(--muted)">${esc(t.date.slice(5))} · ${esc(t.name)}</span>
         <strong style="color:#ff5a5a">−${fmt(t.amount)}</strong>
       </div>`).join('')
     : '';
@@ -4846,7 +4875,7 @@ function renderBadSpending() {
   const badExpHtml = badExpensesItems.length > 0
     ? `<div style="margin-top:10px;font-size:12px;color:var(--muted)">🔁 Регулярно (₽/мес):</div>` +
       badExpensesItems.map(e => `<div style="display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">
-        <span>${e.name}</span><strong style="color:#ff5a5a">−${fmt(e.amount)}/мес</strong>
+        <span>${esc(e.name)}</span><strong style="color:#ff5a5a">−${fmt(e.amount)}/мес</strong>
       </div>`).join('')
     : '';
 
@@ -4926,7 +4955,7 @@ function renderUpcomingCalendar() {
       const color = ev.kind === 'income' ? 'var(--accent)' : (ev.kind === 'credit' ? 'var(--accent2)' : '#ff9f4f');
       const sign = ev.kind === 'income' ? '+' : '−';
       html += `<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:13px">
-        <span>${ev.icon} ${ev.name}</span>
+        <span>${esc(ev.icon)} ${esc(ev.name)}</span>
         <span style="color:${color};font-weight:600">${sign}${fmt(ev.amount)}</span>
       </div>`;
     });
@@ -5009,9 +5038,9 @@ function renderIncome() {
     const currNote = curr !== 'RUB' ? ` · в ${curr}` : '';
     const freqNote = freq === 'monthly' && curr === 'RUB' ? '' : ` · ≈ ${fmt(mthEq)}/мес`;
     const bal = i.balanceId ? (state.balances || []).find(b => b.id === i.balanceId) : null;
-    const balNote = bal ? ` · 💳 ${bal.name}` : '';
+    const balNote = bal ? ` · 💳 ${esc(bal.name)}` : '';
     const earExp = i.earmarkedFor ? (state.expenses || []).find(e => e.id === i.earmarkedFor) : null;
-    const earNote = earExp ? ` · 🔒 на «${earExp.name}»` : '';
+    const earNote = earExp ? ` · 🔒 на «${esc(earExp.name)}»` : '';
     // Ежедневный доход — показываем кнопку «зафиксировать сегодня»
     const loggedTodayRub = freq === 'daily'
       ? state.transactions
@@ -5090,14 +5119,14 @@ function renderIncome() {
         <div class="item-left">
           <div class="item-icon" style="background:#0f2d1f">💰</div>
           <div class="two-row">
-            <div class="item-name">${i.name}${editingIncomeId === i.id ? ' <span style="font-size:10px;color:#4f9fff">· редактируется</span>' : ''}</div>
+            <div class="item-name">${esc(i.name)}${editingIncomeId === i.id ? ' <span style="font-size:10px;color:#4f9fff">· редактируется</span>' : ''}</div>
             <div class="item-sub">${typeLabel[i.type]} · ${FREQ_LABEL[freq]}${currNote}${freqNote}${payDaysText(i)}${balNote}${earNote}</div>
           </div>
         </div>
         <div style="display:flex;align-items:center;gap:2px">
           <div class="item-amount amount-green">${amtDisplay}</div>
-          <button class="delete-btn" title="Редактировать" onclick="editIncome('${i.id}')">✎</button>
-          <button class="delete-btn" onclick="deleteIncome('${i.id}')">✕</button>
+          <button class="delete-btn" title="Редактировать" onclick="editIncome('${esc(i.id)}')">✎</button>
+          <button class="delete-btn" onclick="deleteIncome('${esc(i.id)}')">✕</button>
         </div>
       </div>${dailyActions}${scheduledActions}`;
   });
@@ -5137,7 +5166,7 @@ function renderExpenses() {
         if (e.endDate) sub += ` · до ${formatMonthLabel(e.endDate)}`;
         if (e.balanceId) {
           const bal = state.balances.find(b => b.id === e.balanceId);
-          if (bal) sub += ` · 💳 ${bal.name}`;
+          if (bal) sub += ` · 💳 ${esc(bal.name)}`;
         }
         // Статус автосписания: оплачено ли в текущем месяце + когда следующее
         let statusLine = '';
@@ -5192,7 +5221,7 @@ function renderExpenses() {
           <div class="item-row" style="${finished ? 'opacity:.5' : ''};${isBad ? 'background:rgba(255,90,90,0.06);border-radius:12px' : ''}">
             <div class="item-left">
               <div class="two-row">
-                <div class="item-name">${e.name}${badMark}${finished ? ' · ✅ закрыт' : ''}</div>
+                <div class="item-name">${esc(e.name)}${badMark}${finished ? ' · ✅ закрыт' : ''}</div>
                 <div class="item-sub">${sub}</div>
                 ${statusLine}
                 ${coverageLine}
@@ -5243,10 +5272,10 @@ function renderTransactions() {
     : '';
   let html = `<div class="alert">За этот месяц: <strong>${fmt(expTotal)}</strong> разовых трат · средний чек <strong>${fmt(avgCheck)}</strong> · записей ${items.length}</div>${badBlock}`;
   items.forEach(t => {
-    let sub = `${t.date} · ${t.cat || '📦 Разное'}`;
+    let sub = `${esc(t.date)} · ${esc(t.cat || '📦 Разное')}`;
     if (t.balanceId) {
       const bal = state.balances.find(b => b.id === t.balanceId);
-      if (bal) sub += ` · 💳 ${bal.name}`;
+      if (bal) sub += ` · 💳 ${esc(bal.name)}`;
     }
     const isBad = t.bad && t.type !== 'income';
     const badMark = isBad ? ' <span style="color:#ff5a5a;font-weight:700">🚫</span>' : '';
@@ -5379,7 +5408,11 @@ function renderCredits() {
     const freq = c.freq || 'monthly';
     const monthlyEq = creditMonthlyEq(c);
     const monthsLeft = c.total > 0 && monthlyEq > 0 ? Math.ceil(c.total / monthlyEq) : c.months;
-    const paidPct = c.total > 0 && c.months > 0 ? Math.max(0, Math.round((1 - c.total / (monthlyEq * c.months)) * 100)) : 0;
+    // P0-4: прогресс считаем по уменьшению тела долга (principal - total), а не по сумме платежей
+    const principalAmt = (typeof c.principal === 'number' && c.principal > 0) ? c.principal : c.total;
+    const paidPct = principalAmt > 0
+      ? Math.max(0, Math.min(100, Math.round((principalAmt - c.total) / principalAmt * 100)))
+      : 0;
     const isPaused = !!c.paused;
     const isRev = c.kind === 'revolving';
     const metaBits = [];
@@ -5418,24 +5451,30 @@ function renderCredits() {
     html += `<div class="card" style="${cardOpacity}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
         <div>
-          <div style="font-size:15px;font-weight:600">${c.name}${kindBadge}${pausedBadge}</div>
+          <div style="font-size:15px;font-weight:600">${esc(c.name)}${kindBadge}${pausedBadge}</div>
           <div style="font-size:12px;color:var(--muted);margin-top:2px">${metaBits.join(' · ')}</div>
         </div>
-        <button class="delete-btn" onclick="deleteCredit('${c.id}')">✕</button>
+        <button class="delete-btn" onclick="deleteCredit('${esc(c.id)}')">✕</button>
       </div>
       <div class="grid-2" style="gap:10px;margin-bottom:12px">
         <div><div style="font-size:11px;color:var(--muted)">${paymentLabel}</div>
           <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:var(--accent2)">${fmt(c.monthly)}</div>
           ${freq !== 'monthly' ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">≈ ${fmt(monthlyEq)}/мес</div>` : ''}
         </div>
-        ${c.total > 0 ? `<div><div style="font-size:11px;color:var(--muted)">Остаток</div>
+        ${c.total > 0 ? `<div><div style="font-size:11px;color:var(--muted)">Остаток долга</div>
           <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:var(--accent3)">${fmt(c.total)}</div></div>` : ''}
       </div>
-      ${monthsLeft > 0 ? `<div style="font-size:13px;color:var(--muted)">Осталось ~${monthsLeft} месяцев${c.termUnit === 'weeks' ? ` (≈ ${Math.ceil(monthsLeft * 30.44 / 7)} недель)` : ''}</div>
+      ${(principalAmt > 0 || (c.paidTotal||0) > 0) ? `<div class="grid-2" style="gap:10px;margin-bottom:12px">
+        <div><div style="font-size:11px;color:var(--muted)">Изначально</div>
+          <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:600;color:var(--text)">${fmt(principalAmt)}</div></div>
+        <div><div style="font-size:11px;color:var(--muted)">Выплачено${(c.paidTotal||0) > 0 && (principalAmt - c.total) > 0 ? '' : ' <span style="opacity:0.6">(с этого трекера)</span>'}</div>
+          <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:600;color:var(--accent)">${fmt(c.paidTotal||0)}</div></div>
+      </div>` : ''}
+      ${monthsLeft > 0 ? `<div style="font-size:13px;color:var(--muted)">Осталось ~${monthsLeft} месяцев${c.termUnit === 'weeks' ? ` (≈ ${Math.ceil(monthsLeft * 30.44 / 7)} недель)` : ''} · тело закрыто на ${paidPct}%</div>
       <div class="progress-wrap"><div class="progress-bar blue" style="width:${Math.min(100,paidPct)}%"></div></div>` : ''}
       ${isPaused ? '<div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">На паузе — не попадает в «календарь», «разбивку по зарплатам» и в нагрузку. Остаток долга остаётся в сводке ниже.</div>' : ''}
       <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
-        ${!isPaused ? `<button class="btn btn-primary" style="flex:1;min-width:140px;font-size:12px;padding:10px" onclick="payCreditNow('${c.id}')">💸 Внести платёж</button>` : ''}
+        ${!isPaused ? `<button class="btn btn-primary" style="flex:1;min-width:140px;font-size:12px;padding:10px" onclick="payCreditNow('${esc(c.id)}')">💸 Внести платёж</button>` : ''}
         ${pauseBtn}
         ${kindToggleBtn}
       </div>
@@ -5571,14 +5610,14 @@ function renderGoals() {
     html += `<div class="goal-card" style="${g.paused ? 'opacity:0.65' : ''}">
       <div class="goal-header">
         <div>
-          <div class="goal-name">${g.name}${pausedBadge}</div>
+          <div class="goal-name">${esc(g.name)}${pausedBadge}</div>
           ${subLine ? `<div style="font-size:12px;color:var(--muted);margin-top:4px">${subLine}</div>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:28px">${g.emoji}</span>
+          <span style="font-size:28px">${esc(g.emoji)}</span>
           ${pauseBtn}
-          <button class="delete-btn" onclick="editGoalSaved('${g.id}')" title="Изменить накоплено">✎</button>
-          <button class="delete-btn" onclick="deleteGoal('${g.id}')">✕</button>
+          <button class="delete-btn" onclick="editGoalSaved('${esc(g.id)}')" title="Изменить накоплено">✎</button>
+          <button class="delete-btn" onclick="deleteGoal('${esc(g.id)}')">✕</button>
         </div>
       </div>
       <div class="goal-nums">
@@ -5686,7 +5725,11 @@ function renderTips() {
 
 // Правила автокатегоризации по ключевым словам в описании операции
 const CATEGORY_RULES = [
-  // 🔄 Между своими счетами — обычно НЕ реальные траты (переброс с карты на карту)
+  // 🔄 Между своими — категория для ВНУТРИАППОВЫХ переводов между балансами (convertBetweenBalances).
+  // Банковские "Между своими счетами" (Tinkoff Black → накопительный) сюда НЕ мапятся — это другая
+  // реальность: банк со своими внутренностями, а наши state.balances — пользовательская организация.
+  // Если в импорте такие операции встретятся — попадут в '📦 Разное' (по умолчанию чекнутые),
+  // и пользователь снимает галочку вручную в превью.
   { cat: '🔄 Между своими', keywords: ['внутренний перевод', 'внутрибанковский перевод', 'перевод между счетами', 'перевод на свой', 'собственный счет', 'собственный счёт'] },
   // 💸 Переводы другим — это реальные расходы (подруге, друзьям, мастерам и т.п.)
   { cat: '💸 Переводы', keywords: ['внешний перевод', 'перевод по номеру телефона', 'перевод по номеру карты', 'сбп перевод', 'система быстрых платежей', 'c2a', 'yandexbank_c2a', 'mbank.mts'] },
@@ -6195,7 +6238,7 @@ function renderImportPreview(rows, byCat, sortedCats, totalInc) {
       html += `<label style="margin-bottom:10px;display:block;cursor:pointer;opacity:${opacity}">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
           <input type="checkbox" ${checked} onchange="toggleImportCat('${cat.replace(/'/g, "\\'")}')" style="width:18px;height:18px;accent-color:var(--accent);flex-shrink:0">
-          <span style="font-size:13px;flex:1;min-width:0">${cat}</span>
+          <span style="font-size:13px;flex:1;min-width:0">${esc(cat)}</span>
           <span style="font-size:13px;font-weight:600;text-align:right;flex-shrink:0">
             ${fmt(perMonth)}<span style="color:var(--muted);font-weight:400;font-size:11px">/мес</span>
             ${importSelected[cat] ? '<span style="color:var(--muted);font-weight:400;font-size:11px;margin-left:4px">' + pct + '%</span>' : ''}
@@ -6213,9 +6256,9 @@ function renderImportPreview(rows, byCat, sortedCats, totalInc) {
     html += `<div class="section-title">🧠 Наблюдения и советы</div>`;
     behaviorTips.forEach(t => {
       html += `<div class="tip-card">
-        <div class="tip-icon">${t.icon}</div>
-        <div style="font-size:14px;font-weight:600;margin-bottom:8px">${t.title}</div>
-        <div class="tip-text">${t.text}</div>
+        <div class="tip-icon">${esc(t.icon)}</div>
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">${esc(t.title)}</div>
+        <div class="tip-text">${esc(t.text)}</div>
       </div>`;
     });
   }
@@ -6227,7 +6270,7 @@ function renderImportPreview(rows, byCat, sortedCats, totalInc) {
       html += `<div class="item-row">
         <div class="item-left" style="min-width:0;flex:1">
           <div class="two-row" style="min-width:0">
-            <div class="item-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.name}</div>
+            <div class="item-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.name)}</div>
             <div class="item-sub">${m.count} раз · ~${fmt(m.total / mc)}/мес</div>
           </div>
         </div>
@@ -6275,8 +6318,8 @@ function renderImportPreview(rows, byCat, sortedCats, totalInc) {
     html += `<div class="item-row">
       <div class="item-left" style="min-width:0;flex:1">
         <div class="two-row" style="min-width:0">
-          <div class="item-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.desc}</div>
-          <div class="item-sub">${r.date}${r.cat ? ' · ' + r.cat : ''}</div>
+          <div class="item-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.desc)}</div>
+          <div class="item-sub">${esc(r.date)}${r.cat ? ' · ' + esc(r.cat) : ''}</div>
         </div>
       </div>
       <div class="item-amount" style="color:${color};flex-shrink:0">${sign}${fmt(r.amount)}</div>
@@ -6507,7 +6550,7 @@ function importData() {
         // Сбрасываем state в дефолты со ВСЕМИ полями и заново загружаем
         state = {
           incomes: [], expenses: [], transactions: [], credits: [],
-          goals: [], habits: [], balances: [], rates: { USD: 90, USDT: 90 }, lastImport: null
+          goals: [], habits: [], balances: [], rates: { USD: 75, USDT: 75 }, lastImport: null
         };
         load();
         renderAll();
@@ -6787,7 +6830,7 @@ function renderSparkDayPanel() {
     if (dayTx.length > 0) {
       dayTx.forEach(t => {
         html += `<div class="dp-row">
-          <span>${t.cat || '—'} · ${t.name}</span>
+          <span>${esc(t.cat || '—')} · ${esc(t.name)}</span>
           <span style="color:var(--accent2)">−${fmt(t.amount)}</span>
         </div>`;
       });
@@ -6798,7 +6841,7 @@ function renderSparkDayPanel() {
           ? ` (${t.nativeAmount} ${t.nativeCurrency === 'USDT' ? '₮' : '$'})`
           : '';
         html += `<div class="dp-row">
-          <span>💰 ${t.name}${native}</span>
+          <span>💰 ${esc(t.name)}${native}</span>
           <span style="color:var(--accent)">+${fmt(t.amount)}</span>
         </div>`;
       });
@@ -7026,8 +7069,8 @@ function renderSubAudit() {
   monthlySubs.forEach(e => {
     html += `<div class="sub-row">
       <div>
-        <div style="font-size:14px;font-weight:600">${e.name}</div>
-        <div class="sub-meta">${e.cat} · ежемесячно${e.payDay ? ` · ${e.payDay} числа` : ''}</div>
+        <div style="font-size:14px;font-weight:600">${esc(e.name)}</div>
+        <div class="sub-meta">${esc(e.cat)} · ежемесячно${e.payDay ? ` · ${e.payDay} числа` : ''}</div>
       </div>
       <div class="sub-amt">${fmt(e.amount)}/мес</div>
     </div>`;
@@ -7035,8 +7078,8 @@ function renderSubAudit() {
   recurring.slice(0, 6).forEach(r => {
     html += `<div class="sub-row">
       <div>
-        <div style="font-size:14px;font-weight:600">${r.name}</div>
-        <div class="sub-meta">${r.cat} · ${r.count} списаний за 90 дней · ≈${fmt(r.avg)} за раз</div>
+        <div style="font-size:14px;font-weight:600">${esc(r.name)}</div>
+        <div class="sub-meta">${esc(r.cat)} · ${r.count} списаний за 90 дней · ≈${fmt(r.avg)} за раз</div>
       </div>
       <div class="sub-amt">${fmt(r.total)}</div>
     </div>`;
@@ -7183,8 +7226,8 @@ function refreshQuickBalanceSelect() {
   }
   sel.innerHTML = '<option value="">— не привязывать, только учесть в бюджете —</option>' +
     balances.map(b => {
-      const label = `${b.emoji || '💳'} ${b.name} · ${fmtCur(b.amount, b.currency)}`;
-      return `<option value="${b.id}">${label}</option>`;
+      const label = `${esc(b.emoji || '💳')} ${esc(b.name)} · ${fmtCur(b.amount, b.currency)}`;
+      return `<option value="${esc(b.id)}">${label}</option>`;
     }).join('');
   // Автовыбор: если есть ровно один рублёвый — предвыбрать его
   if (prev && balances.some(b => b.id === prev)) {
@@ -7373,7 +7416,7 @@ function renderPendingEventsLists() {
         ${pendingIncomes.map(p => {
           const balText = p.balanceId ? (() => {
             const b = (state.balances || []).find(x => x.id === p.balanceId);
-            return b ? `💳 ${b.name}` : 'Без счёта';
+            return b ? `💳 ${esc(b.name)}` : 'Без счёта';
           })() : '💳 Без счёта (только доход в учёт)';
           const when = p.overdueDays === 0
             ? `Сегодня (${p.payDay} число) — день выплаты`
@@ -7384,16 +7427,16 @@ function renderPendingEventsLists() {
           const amtDisplay = p.currency === 'RUB' ? fmt(p.amount) : `${p.amount} ${sym}`;
           return `
             <div class="card" style="margin-bottom:10px;padding:14px;border-left:3px solid var(--accent)">
-              <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:700;margin-bottom:4px">${p.name}</div>
+              <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:700;margin-bottom:4px">${esc(p.name)}</div>
               <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${when}</div>
               <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
                 <div style="font-size:12px;color:var(--muted)">${balText}</div>
                 <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700;color:var(--accent)">${amtDisplay}</div>
               </div>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
-                <button class="btn btn-primary" style="flex:1;min-width:130px;font-size:12px;padding:10px" onclick="confirmIncomeReceived('${p.incomeId}','${p.expectedDate}')">✅ Получил — зачислить</button>
-                <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px" onclick="incomeNotYetArrived('${p.incomeId}','${p.expectedDate}')">⏳ Ещё не пришло</button>
-                <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px;color:var(--accent2)" onclick="skipIncomeMonth('${p.incomeId}','${p.expectedDate}')">⏭ Пропустить</button>
+                <button class="btn btn-primary" style="flex:1;min-width:130px;font-size:12px;padding:10px" onclick="confirmIncomeReceived('${esc(p.incomeId)}','${esc(p.expectedDate)}')">✅ Получил — зачислить</button>
+                <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px" onclick="incomeNotYetArrived('${esc(p.incomeId)}','${esc(p.expectedDate)}')">⏳ Ещё не пришло</button>
+                <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px;color:var(--accent2)" onclick="skipIncomeMonth('${esc(p.incomeId)}','${esc(p.expectedDate)}')">⏭ Пропустить</button>
               </div>
             </div>`;
         }).join('')}`;
@@ -7412,16 +7455,16 @@ function renderPendingEventsLists() {
             : `Просрочено на ${p.overdueDays} ${p.overdueDays === 1 ? 'день' : (p.overdueDays < 5 ? 'дня' : 'дней')} (должно было ${p.payDay} числа)`;
           return `
             <div class="card" style="margin-bottom:10px;padding:14px;border-left:3px solid var(--accent2)">
-              <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:700;margin-bottom:4px">${p.name}</div>
+              <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:700;margin-bottom:4px">${esc(p.name)}</div>
               <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${when}</div>
               <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
-                <div style="font-size:12px;color:var(--muted)">Счёт: ${p.balanceName}</div>
+                <div style="font-size:12px;color:var(--muted)">Счёт: ${esc(p.balanceName)}</div>
                 <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700">${fmtCur(p.amount, p.currency)}</div>
               </div>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
-                <button class="btn btn-primary" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="confirmDeduction('${p.expId}','${p.monthKey}')">✅ Списать с баланса</button>
-                <button class="btn btn-ghost" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="markPaidExternal('${p.expId}','${p.monthKey}')">💳 Уже оплатил сам</button>
-                <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px;color:var(--accent2)" onclick="skipDeductionMonth('${p.expId}','${p.monthKey}')">⏭ Пропустить месяц</button>
+                <button class="btn btn-primary" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="confirmDeduction('${esc(p.expId)}','${esc(p.monthKey)}')">✅ Списать с баланса</button>
+                <button class="btn btn-ghost" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="markPaidExternal('${esc(p.expId)}','${esc(p.monthKey)}')">💳 Уже оплатил сам</button>
+                <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px;color:var(--accent2)" onclick="skipDeductionMonth('${esc(p.expId)}','${esc(p.monthKey)}')">⏭ Пропустить месяц</button>
               </div>
             </div>`;
         }).join('')}`;
@@ -7440,16 +7483,16 @@ function renderPendingEventsLists() {
             : `Просрочено на ${p.overdueDays} ${p.overdueDays === 1 ? 'день' : (p.overdueDays < 5 ? 'дня' : 'дней')} (должно было ${p.payDay} числа)`;
           return `
             <div class="card" style="margin-bottom:10px;padding:14px;border-left:3px solid var(--accent2)">
-              <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:700;margin-bottom:4px">🏦 ${p.name}</div>
+              <div style="font-family:'Unbounded',sans-serif;font-size:14px;font-weight:700;margin-bottom:4px">🏦 ${esc(p.name)}</div>
               <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${when}</div>
               <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
-                <div style="font-size:12px;color:var(--muted)">Счёт: ${p.balanceName}</div>
+                <div style="font-size:12px;color:var(--muted)">Счёт: ${esc(p.balanceName)}</div>
                 <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700">${fmtCur(p.amount, p.currency)}</div>
               </div>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
-                <button class="btn btn-primary" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="confirmCreditDeduction('${p.crId}','${p.chargeKey}')">✅ Списать с баланса</button>
-                <button class="btn btn-ghost" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="markCreditPaidExt('${p.crId}','${p.chargeKey}')">💳 Уже оплатил сам</button>
-                <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px;color:var(--accent2)" onclick="skipCreditCharge('${p.crId}','${p.chargeKey}')">⏭ Пропустить</button>
+                <button class="btn btn-primary" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="confirmCreditDeduction('${esc(p.crId)}','${esc(p.chargeKey)}')">✅ Списать с баланса</button>
+                <button class="btn btn-ghost" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="markCreditPaidExt('${esc(p.crId)}','${esc(p.chargeKey)}')">💳 Уже оплатил сам</button>
+                <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px;color:var(--accent2)" onclick="skipCreditCharge('${esc(p.crId)}','${esc(p.chargeKey)}')">⏭ Пропустить</button>
               </div>
             </div>`;
         }).join('')}`;
