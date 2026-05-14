@@ -1,6 +1,6 @@
 // service-worker.js — офлайн-кеш для «Мои финансы»
 // При обновлении index.html — поднять CACHE_VERSION, иначе пользователи будут видеть старую версию.
-const CACHE_VERSION = 'fintrack-v6';
+const CACHE_VERSION = 'fintrack-v7';
 const CORE_ASSETS = [
   './',
   './index.html',

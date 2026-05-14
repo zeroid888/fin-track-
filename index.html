@@ -1583,12 +1583,32 @@ let state = {
   goals: [],
   habits: [],        // регулярные привычки: { id, name, emoji, cost, freq, cat, active }  freq: daily|weekdays|weekly|biweekly|semimonthly|monthly
   balances: [],      // { id, name, emoji, amount, currency: 'RUB'|'USD'|'USDT' }
+  // AUDIT P0-1 | Хардкод курсов 90 ₽ устарел с 2025. При новой установке план в валюте занижен ~30-40%.
+  // Лечится в saveRates() (выходить на свежий курс при старте) или показывать banner "Курсы не обновлялись N дней".
+  // См. fintrack-audit.html.
   rates: { USD: 90, USDT: 90 },
   lastImport: null
 };
 
+// AUDIT P0-5 [FIXED 2026-05-14] | save() обёрнут в try/catch + блокировка через __SAVE_BLOCKED__,
+// если load() не смог прочесть данные (см. P0-7). При QuotaExceededError показываем алерт один раз.
+// AUDIT P0-9 [FIXED 2026-05-14] | Подписка на 'storage' добавлена в INIT — при изменении в другой
+// вкладке предлагаем reload. Также пишем updatedAt в state перед save() для будущей diff-логики.
 function save() {
-  localStorage.setItem('myfinance_v2', JSON.stringify(state));
+  if (window.__SAVE_BLOCKED__) {
+    console.warn('save() заблокирован: load() не смог прочесть данные. Восстанови из бэкапа.');
+    return;
+  }
+  try {
+    state.__updatedAt = Date.now(); // для storage-listener в другой вкладке
+    localStorage.setItem('myfinance_v2', JSON.stringify(state));
+  } catch (e) {
+    console.error('save() ошибка:', e);
+    if (!window.__SAVE_ERROR_SHOWN__) {
+      window.__SAVE_ERROR_SHOWN__ = true;
+      alert('⚠️ Не удалось сохранить (квота переполнена или приватный режим Safari). СРОЧНО экспортируй бэкап через «Настройки → Экспорт», иначе следующие правки тоже не сохранятся.');
+    }
+  }
 }
 
 function load() {
@@ -1597,6 +1617,9 @@ function load() {
     try {
       const parsed = JSON.parse(d);
       // 1. Берём всё, что было сохранено, поверх дефолтов
+      // AUDIT P0-8 | Object.assign(state, parsed) НЕ удаляет фантомные поля. При переименовании
+      // полей state в будущем старое имя останется, новое будет пустым — данные тихо "пропадут".
+      // Плюс мусорные ключи из бэкапа попадут в state и далее в save(). См. code-review.html#f-objassign.
       state = Object.assign(state, parsed);
 
       // 2. Миграции — гарантируем что новые поля есть и не затирают пользовательские данные
@@ -1608,6 +1631,9 @@ function load() {
       if (!Array.isArray(state.habits)) state.habits = [];
       if (!Array.isArray(state.balances)) state.balances = [];
       if (!state.rates || typeof state.rates !== 'object') state.rates = { USD: 90, USDT: 90 };
+      // AUDIT P0-1 | typeof === 'number' ловит NaN/строки, но НЕ ловит 0 и отрицательные.
+      // Если когда-то state.rates.USD стал 0 — проверка проходит, и весь USD-доход уходит в 0₽ (см. toRub).
+      // Должно быть: typeof X === 'number' && X > 0.
       if (typeof state.rates.USD !== 'number') state.rates.USD = 90;
       if (typeof state.rates.USDT !== 'number') state.rates.USDT = 90;
 
@@ -1692,7 +1718,18 @@ function load() {
         if (!h.emoji) h.emoji = '🎯';
         if (!h.cat) h.cat = 'Привычка';
       });
-    } catch (e) { console.error('Не удалось загрузить данные:', e); }
+    } catch (e) {
+      // AUDIT P0-7 [FIXED 2026-05-14] | Сохраняем битую копию в отдельный ключ для recovery,
+      // блокируем save() через __SAVE_BLOCKED__, показываем алерт пользователю с инструкцией.
+      console.error('Не удалось загрузить данные:', e);
+      try { localStorage.setItem('myfinance_v2_corrupted_' + Date.now(), d); } catch (e2) {}
+      window.__SAVE_BLOCKED__ = true;
+      setTimeout(() => alert(
+        '⚠️ Данные не читаются (битый JSON в localStorage).\n\n' +
+        'Битая копия сохранена под ключом «myfinance_v2_corrupted_<timestamp>» — можно достать через DevTools.\n\n' +
+        'Сохранение ЗАБЛОКИРОВАНО, чтобы не затереть. Восстанови из бэкапа через «Настройки → Импорт» и перезагрузи страницу.'
+      ), 100);
+    }
   }
 }
 
@@ -1710,7 +1747,10 @@ function fmtCur(n, cur) {
     : Math.round(n).toLocaleString('ru-RU');
   return cur === 'RUB' || !cur ? `${val} ${sym}` : `${sym}${val}`;
 }
-// Конвертация в рубли
+// AUDIT P0-2 | Молчаливый fallback на 0: если rate отсутствует/равен 0, USD-доход $35/день → 0₽.
+// Это рушит весь план через toRub(amount, 'USD') без всякого предупреждения. Если нужен молчаливый
+// fallback — пусть возвращает amount (как ₽), и параллельно где-то вверх по стеку показывается warning
+// "Курс USD не задан". Сейчас именно тихий 0 — худший из возможных вариантов.
 function toRub(amount, currency) {
   if (!currency || currency === 'RUB') return amount;
   const rate = (state.rates && state.rates[currency]) || 0;
@@ -1782,6 +1822,12 @@ function toggleGoalPause(id) {
   renderAll();
   toast(g.paused ? `⏸ «${g.name}» на паузе — не резервируем взнос` : `▶️ «${g.name}» снова в работе`);
 }
+// AUDIT P0-6 | Излишек earmark-дохода «исчезает» из учёта.
+// Пример: BitZone приносит ~1500 USDT/мес (= ~135 000₽), аренда 987 USDT (= ~88 830₽).
+// Излишек 513 USDT (~46 170₽) НЕ попадает ни в freeIncome (earmarked income весь вычитается),
+// ни в balances, ни в goals. Семантически он «копится на тот же расход», но кода под это нет.
+// Лечение: либо излишек идёт в freeIncome (тогда earmark — только индикатор связи),
+// либо в указанный balance, либо в новую goal.
 // ===== EARMARKED INCOME =====
 // Доход, зарезервированный под конкретный расход (BitZone → Квартира),
 // не распыляется на цели / дневной бюджет.
@@ -1887,6 +1933,11 @@ function currentMonthKey() {
 function currentMonthTransactions() {
   return state.transactions.filter(t => monthKey(t.date) === currentMonthKey());
 }
+// AUDIT P0-3 | Эти две функции НЕ исключают категорию '🔄 Между своими' (переводы между своими счетами).
+// convertBetweenBalances() создаёт парные транзакции: out как 'expense', in как 'income' с этой категорией.
+// Сейчас перевод 1000 USDT → ₽ раздувает totalTransactionIncome на ~90 000₽, портит actualDailyNet
+// в getCashflowSnapshot, искажает аналитику. averageDailyLifeSpend() фильтр имеет (1815), эти — нет.
+// Лечение: добавить .filter(t => t.cat !== '🔄 Между своими' && !t.transferPairId).
 function totalTransactionExpenses() {
   return currentMonthTransactions().filter(t => t.type !== 'income').reduce((s, t) => s + t.amount, 0);
 }
@@ -2257,8 +2308,15 @@ function getCashflowSnapshot() {
   // Устойчивый дневной бюджет — от месячного свободного остатка (доход - обязательные - кредиты - привычки - накопления на цели)
   const habitsMonthly = totalHabitsMonthly();
   const monthlyFree = freeIncome() - uncoveredExpensesTotal() - totalCredits() - totalGoalsMonthly() - habitsMonthly;
+  // AUDIT P0-18 | / 30 hardcoded рядом с честным daysLeftInMonth() ниже. В последний день месяца
+  // с monthlyFree 120k показывает ~4k, хотя реально можно потратить весь остаток (через 5 дней ЗП).
+  // Фикс: monthlyFree / daysLeftInMonth(). См. code-review.html#f-sustain-30 + P1-1 для habits.
   const sustainableDaily = monthlyFree > 0 ? monthlyFree / 30 : 0;
 
+  // AUDIT P1-2 | Магические "3" и "2" — эвристика без явного обоснования.
+  // 3 дня: близко к выплате, остаток делится на мало дней и rawDaily пляшет (например 15000₽ / 2 дня = 7500/день).
+  // 2x: sanity-cap — если rawDaily в 2+ раза больше устойчивого дневного, доверяем устойчивому.
+  // Эти числа стоит вынести в именованные константы (CYCLE_END_SWITCH_DAYS, RAW_DAILY_SANITY_FACTOR) для ясности.
   // Умный выбор: если выплата близко (меньше 3 дней) — НЕ используем rawDaily, чтобы он не давал абсурдные значения
   let smartDaily;
   if (budgetDays < 3 || rawDaily > sustainableDaily * 2) {
@@ -2308,6 +2366,9 @@ function dailyBudget() {
 }
 
 // ===== INCOME =====
+// AUDIT P1-1 | daily=30 захардкожено. Февраль (28 дней) даст переоценку ~7%, март/август (31) — недооценку ~3%.
+// Особенно заметно на USD/USDT-дневных доходах: BitZone 30₮/день × 30 = 900₮/мес, реально может быть 868–930₮.
+// При желании — заменить на dynamic daysInMonth() для текущего месяца, либо средние 30.4375.
 // Множитель для перевода выплаты в месячный эквивалент
 const FREQ_MULT = {
   monthly: 1,
@@ -2729,6 +2790,11 @@ function addExpense() {
 
 // Готовим список платежей, по которым НАСТУПИЛ или ПРОПУЩЕН срок в текущем месяце.
 // Деньги с баланса НЕ списываем — это решает пользователь через подтверждение в UI.
+// AUDIT P0-11 | "В текущем месяце" — это и есть баг: пропущенные месяцы (3 месяца не открывал app)
+// не догоняются. Их deductionLog пуст за прошлые ключи YYYY-MM, но функция итерирует только
+// todayYm. Баланс BitZone's расходится с реальностью на 3×987₮ ≈ 260k₽, а пользователь видит
+// "лишнюю подушку" и тратит. То же у findPendingCreditDeductions и findPendingIncomes.
+// Фикс: итерировать от min(today, createdDate, today-3 months) до сегодня. См. code-review.html#f-pending.
 function findPendingDeductions() {
   const today = new Date();
   const todayYm = currentMonthKey();
@@ -2769,6 +2835,12 @@ function findPendingDeductions() {
 }
 
 // Подтверждённое списание (вызывает UI после ответа пользователя)
+// AUDIT P0-12 | Уменьшает bal.amount + пишет deductionLog, НО НЕ создаёт транзакцию в state.transactions.
+// Сравни с applyIncomeReceived — там push в transactions есть. Из-за этого расход исчезает из ленты,
+// графиков, среднего чека, экспорта. Пользователь думает "где аренда?" → добавляет вручную → двойной учёт.
+// См. code-review.html#f-apply-tx.
+// AUDIT P0-13 | Здесь и в applyCreditDeduction нет confirm на уход баланса в минус (в addExpense — есть).
+// Подтверждение списания 987₮ при балансе 200 → −787 без warning. См. code-review.html#f-apply-minus.
 function applyDeduction(expId, monthKey) {
   const exp = state.expenses.find(e => e.id === expId);
   if (!exp) return false;
@@ -2858,6 +2930,12 @@ function findPendingCreditDeductions() {
   return pending;
 }
 
+// AUDIT P0-4 | Долг гасится без процентов: cr.total -= cr.monthly целиком.
+// На любом кредите со ставкой rate > 0 это математически неверно — часть платежа идёт на % (не уменьшает тело).
+// На ипотеке 10–15 лет 15% годовых расхождение нарастает на десятки тысяч ₽/год.
+// Правильно: monthlyInterest = cr.total * cr.rate / 12 / 100; principal = cr.monthly - monthlyInterest;
+//            cr.total = Math.max(0, cr.total - principal);
+// Для rate=0 поведение идентично текущему — миграция безопасна.
 // Подтверждённое списание кредита: снимаем с баланса и уменьшаем остаток долга
 function applyCreditDeduction(crId, chargeKey) {
   const cr = state.credits.find(c => c.id === crId);
@@ -2902,6 +2980,10 @@ function payCreditNow(crId) {
   if (!cr) return;
   const input = window.prompt(`Сколько внести в счёт «${cr.name}»? (₽)\nПо умолчанию — один платёж: ${cr.monthly || 0}.`, String(cr.monthly || 0));
   if (input === null) return;
+  // AUDIT P0-16 | parseFloat без удаления пробелов: "10 000" → 10. Списываем 10₽ вместо 10000₽,
+  // долг тоже минус 10. Везде по проекту канон — parseAmount() (он убирает пробелы и NBSP).
+  // Плюс параллельно баг: тут не пушится транзакция в state.transactions (как в applyDeduction).
+  // См. code-review.html#f-paycredit.
   const amt = parseFloat(String(input).replace(',', '.'));
   if (!isFinite(amt) || amt <= 0) { alert('Некорректная сумма.'); return; }
   if (cr.balanceId) {
@@ -3572,6 +3654,10 @@ function convertBetweenBalances() {
     fromBal.amount = Math.round((fromBal.amount - amt) * 100) / 100;
     toBal.amount = Math.round((toBal.amount + destAmt) * 100) / 100;
 
+    // AUDIT P0-3 | Эта пара транзакций — источник transfer-leak бага. Out-сторона type:'expense',
+    // in-сторона type:'income' с категорией '🔄 Между своими'. totalTransactionIncome/Expenses (1893–1898)
+    // НЕ фильтруют эту категорию → перевод между своими счетами раздувает «факт-доход» и «факт-расход» месяца.
+    // averageDailyLifeSpend (1815) фильтр имеет — там работает корректно.
     // Записываем парные транзакции с категорией «🔄 Между своими» — в бюджет они не попадут,
     // но останутся в истории
     const pairId = safeId();
@@ -3620,6 +3706,14 @@ function convertBetweenBalances() {
   }
 }
 
+// AUDIT P0-17 | Все render-функции ниже массово используют ${i.name}, ${m.name}, ${r.desc}
+// и т.п. в шаблонной строке, которая идёт в .innerHTML БЕЗ эскейпа. Daniel сам не злоумышленник,
+// но описания транзакций приходят из импорта CSV/PDF выписки — произвольная строка от платёжной
+// системы. На безобидном "<" вёрстка ломается (правую часть DOM съедает). На злом
+// <img src=x onerror=...> крадёт localStorage с финансами (особенно болезненно в Capacitor WebView).
+// В renderPendingEventsLists ${p.name} соседствует с onclick="...'${p.incomeId}'..." — апостроф
+// в id ломает JS-инжекцию. Фикс: helper esc(s) и проход по всем ${...name}/${...desc}/${...cat}
+// в innerHTML. Один вечер работы. См. code-review.html#f-xss.
 function renderBalances() {
   const list = document.getElementById('balance-list');
   if (!list) return;
@@ -4222,6 +4316,11 @@ function renderDashboard() {
   currentMonthTransactions().filter(t => t.type !== 'income').forEach(t => {
     cats[t.cat] = (cats[t.cat] || 0) + t.amount;
   });
+  // AUDIT P0-15 | Два бага в одной строке: (1) c.monthly вместо creditMonthlyEq(c) — для
+  // weekly/biweekly недоучёт в 4× (5k/нед показывается как 5k вместо 21.7k); (2) paused-кредитки
+  // тоже плюсуются. totalCredits() выше считает правильно — на одном дашборде total и breakdown
+  // расходятся. Должно быть: activeCredits().forEach(c => cats[...] += creditMonthlyEq(c)).
+  // См. code-review.html#f-cats-credit.
   state.credits.forEach(c => {
     cats['🏦 Кредиты'] = (cats['🏦 Кредиты'] || 0) + c.monthly;
   });
@@ -4502,6 +4601,10 @@ function renderPastPaycheck() {
   const horizonBack = new Date(today.getFullYear(), today.getMonth() - 2, 1);
   (state.incomes || []).forEach(inc => {
     if (inc.freq !== 'semimonthly' && inc.freq !== 'monthly') return;
+    // AUDIT P0-14 | Для monthly читаем inc.payDay, которого В СХЕМЕ НЕТ — есть только
+    // inc.payDays (массив). Для monthly-зарплат payDays.length === 0 → ранний return →
+    // блок "План прошлой выплаты vs Факт" молча скрыт без ошибки в консоли. Для semimonthly
+    // работает. Фикс: всегда читать inc.payDays. См. code-review.html#f-paydays.
     const payDays = inc.freq === 'monthly'
       ? (inc.payDay ? [inc.payDay] : [])
       : (Array.isArray(inc.payDays) ? inc.payDays : []);
@@ -6299,12 +6402,28 @@ function importData() {
         const parsed = JSON.parse(e.target.result);
         const loaded = parsed.state || parsed; // поддерживаем и прямой state, и обёртку {version, state}
         if (!loaded || typeof loaded !== 'object') throw new Error('Файл не похож на бэкап');
+        // AUDIT P0-10 [FIXED 2026-05-14] | (1) Жёсткая валидация структуры — отказ при битых типах,
+        // показывает список конкретных проблем. (2) Default state теперь содержит habits[] —
+        // если в бэкапе нет habits, они не пропадут после load() (миграция в load() их создаст).
+        const expectedArrays = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances'];
+        const issues = [];
+        expectedArrays.forEach(k => {
+          if (loaded[k] !== undefined && !Array.isArray(loaded[k])) issues.push(`${k}: ожидался массив, получено ${typeof loaded[k]}`);
+        });
+        if (loaded.rates !== undefined && (typeof loaded.rates !== 'object' || loaded.rates === null)) {
+          issues.push(`rates: ожидался объект, получено ${typeof loaded.rates}`);
+        }
+        if (issues.length > 0) {
+          alert('⚠️ Бэкап выглядит битым, импорт отменён:\n\n' + issues.join('\n') + '\n\nДанные остались как были.');
+          fileEl.value = '';
+          return;
+        }
         // Сохраняем в localStorage и перезагружаем через load() — чтобы отработала миграция
         localStorage.setItem('myfinance_v2', JSON.stringify(loaded));
-        // Сбрасываем state в дефолты и заново загружаем
+        // Сбрасываем state в дефолты со ВСЕМИ полями и заново загружаем
         state = {
           incomes: [], expenses: [], transactions: [], credits: [],
-          goals: [], balances: [], rates: { USD: 90, USDT: 90 }, lastImport: null
+          goals: [], habits: [], balances: [], rates: { USD: 90, USDT: 90 }, lastImport: null
         };
         load();
         renderAll();
@@ -6364,6 +6483,9 @@ function dailyExpenseTotals(daysBack = 14) {
 
 // --- Financial Health Score (0..100) ---
 // Breakdown: debt load (25), savings rate vs income (25), safety cushion months (25), spending discipline (25)
+// AUDIT P2/info | Все пороги — эвристика: 50% долга к доходу = 0 баллов, 30% = ещё «норм», 20% savings rate = 25 баллов,
+// 6 месяцев подушки = 25 баллов. Это близко к подходу Dave Ramsey / Fidelity rule-of-thumb, но не подкреплено
+// конкретным источником. Для personal-use ок, но при коммуникации с пользователем стоит ссылаться на основу.
 function computeHealthScore() {
   const inc = totalIncome();
   const exp = totalExpenses();
@@ -7068,6 +7190,23 @@ function renderV2() {
 
 // ===== INIT =====
 load();
+
+// AUDIT P0-9 [FIXED 2026-05-14] | storage-listener для двух открытых вкладок: если другая
+// вкладка обновила state в localStorage, предлагаем reload, чтобы не затереть её правки
+// последующим save() с устаревшим in-memory state. См. code-review.html#f-twotab.
+window.addEventListener('storage', (e) => {
+  if (e.key !== 'myfinance_v2' || e.newValue === e.oldValue) return;
+  if (window.__STORAGE_PROMPT_SHOWN__) return;
+  window.__STORAGE_PROMPT_SHOWN__ = true;
+  const yes = confirm(
+    '⚠️ Данные были обновлены в другой вкладке.\n\n' +
+    'Перезагрузить страницу, чтобы подтянуть свежие данные?\n\n' +
+    '«Отмена» — рискованно: следующее сохранение в этой вкладке затрёт правки из другой.'
+  );
+  window.__STORAGE_PROMPT_SHOWN__ = false;
+  if (yes) location.reload();
+});
+
 if (document.getElementById('tx-date')) document.getElementById('tx-date').value = todayIso();
 renderAll();
 // На старте — предложим подтвердить плановые доходы/списания (ничего автоматически не трогаем)
