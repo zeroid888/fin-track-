@@ -1617,10 +1617,12 @@ function load() {
     try {
       const parsed = JSON.parse(d);
       // 1. Берём всё, что было сохранено, поверх дефолтов
-      // AUDIT P0-8 | Object.assign(state, parsed) НЕ удаляет фантомные поля. При переименовании
-      // полей state в будущем старое имя останется, новое будет пустым — данные тихо "пропадут".
-      // Плюс мусорные ключи из бэкапа попадут в state и далее в save(). См. code-review.html#f-objassign.
-      state = Object.assign(state, parsed);
+      // AUDIT P0-8 [FIXED 2026-05-14] | Whitelist разрешённых ключей — мусор/фантомы из бэкапа
+      // в state не попадают. При будущем переименовании поля добавь шаг миграции ниже.
+      const ALLOWED_KEYS = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances', 'rates', 'lastImport'];
+      ALLOWED_KEYS.forEach(k => {
+        if (parsed[k] !== undefined) state[k] = parsed[k];
+      });
 
       // 2. Миграции — гарантируем что новые поля есть и не затирают пользовательские данные
       if (!Array.isArray(state.incomes)) state.incomes = [];
@@ -1631,11 +1633,14 @@ function load() {
       if (!Array.isArray(state.habits)) state.habits = [];
       if (!Array.isArray(state.balances)) state.balances = [];
       if (!state.rates || typeof state.rates !== 'object') state.rates = { USD: 90, USDT: 90 };
-      // AUDIT P0-1 | typeof === 'number' ловит NaN/строки, но НЕ ловит 0 и отрицательные.
-      // Если когда-то state.rates.USD стал 0 — проверка проходит, и весь USD-доход уходит в 0₽ (см. toRub).
-      // Должно быть: typeof X === 'number' && X > 0.
-      if (typeof state.rates.USD !== 'number') state.rates.USD = 90;
-      if (typeof state.rates.USDT !== 'number') state.rates.USDT = 90;
+      // AUDIT P0-1 [FIXED 2026-05-14] | Проверка позитивности + парсинг строк ("100" из старого бэкапа
+      // теперь сохраняется как число, а не сбрасывается в 90).
+      ['USD', 'USDT'].forEach(cur => {
+        const v = state.rates[cur];
+        if (typeof v === 'number' && isFinite(v) && v > 0) return; // ok
+        const p = parseFloat(v); // парсим строку
+        state.rates[cur] = (isFinite(p) && p > 0) ? p : 90;
+      });
 
       // 3. Добавляем новые поля старым записям (backward-compat)
       state.incomes.forEach(i => {
@@ -1747,20 +1752,36 @@ function fmtCur(n, cur) {
     : Math.round(n).toLocaleString('ru-RU');
   return cur === 'RUB' || !cur ? `${val} ${sym}` : `${sym}${val}`;
 }
-// AUDIT P0-2 | Молчаливый fallback на 0: если rate отсутствует/равен 0, USD-доход $35/день → 0₽.
-// Это рушит весь план через toRub(amount, 'USD') без всякого предупреждения. Если нужен молчаливый
-// fallback — пусть возвращает amount (как ₽), и параллельно где-то вверх по стеку показывается warning
-// "Курс USD не задан". Сейчас именно тихий 0 — худший из возможных вариантов.
+// AUDIT P0-2 [FIXED 2026-05-14] | При невалидном курсе показываем алерт (один раз на валюту) и
+// возвращаем amount как ₽ — не 0! Так дашборд хоть и слегка кривой, но не теряет 175k дохода
+// в ноль. После исправления курса в Балансах всё пересчитается корректно.
 function toRub(amount, currency) {
   if (!currency || currency === 'RUB') return amount;
-  const rate = (state.rates && state.rates[currency]) || 0;
+  const rate = (state.rates && state.rates[currency]);
+  if (typeof rate !== 'number' || !isFinite(rate) || rate <= 0) {
+    if (!window.__RATE_WARN_SHOWN__) window.__RATE_WARN_SHOWN__ = {};
+    if (!window.__RATE_WARN_SHOWN__[currency]) {
+      window.__RATE_WARN_SHOWN__[currency] = true;
+      setTimeout(() => alert(`⚠️ Курс ${currency} не задан или некорректен.\nОткрой вкладку «Балансы» и обнови. До этого ${currency}-суммы считаются как рубли — итоги неточны.`), 50);
+    }
+    return amount; // fallback: не теряем сумму, считаем как ₽
+  }
   return amount * rate;
 }
 // Обратная конвертация из рублей в валюту
 function fromRub(rubAmount, currency) {
   if (!currency || currency === 'RUB') return rubAmount;
-  const rate = (state.rates && state.rates[currency]) || 1;
-  return rate > 0 ? rubAmount / rate : 0;
+  const rate = (state.rates && state.rates[currency]);
+  if (typeof rate !== 'number' || !isFinite(rate) || rate <= 0) return rubAmount;
+  return rubAmount / rate;
+}
+
+// AUDIT P0-17 [helper esc 2026-05-14] | HTML-эскейп для интерполяции в innerHTML.
+// Применяется точечно в местах с пользовательскими/импортированными строками. Полный аудит
+// всех ${...name} — отдельная задача (см. code-review.html#f-xss).
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 // Безопасный парсер числа: принимает "50 000", "50,000.50", "50000", "1 234,56"
@@ -2311,7 +2332,9 @@ function getCashflowSnapshot() {
   // AUDIT P0-18 | / 30 hardcoded рядом с честным daysLeftInMonth() ниже. В последний день месяца
   // с monthlyFree 120k показывает ~4k, хотя реально можно потратить весь остаток (через 5 дней ЗП).
   // Фикс: monthlyFree / daysLeftInMonth(). См. code-review.html#f-sustain-30 + P1-1 для habits.
-  const sustainableDaily = monthlyFree > 0 ? monthlyFree / 30 : 0;
+  // AUDIT P0-18 [FIXED 2026-05-14] | Делим на остаток дней, не на жёсткие 30 — в последний день
+  // месяца теперь корректно показывает реальный доступный остаток на день.
+  const sustainableDaily = monthlyFree > 0 ? monthlyFree / Math.max(1, daysLeftInMonth()) : 0;
 
   // AUDIT P1-2 | Магические "3" и "2" — эвристика без явного обоснования.
   // 3 дня: близко к выплате, остаток делится на мало дней и rawDaily пляшет (например 15000₽ / 2 дня = 7500/день).
@@ -2560,10 +2583,24 @@ function logIncomeForToday(incomeId) {
   const amtRub = toRub(amtNative, curr);
 
   // Не допускаем дубля за сегодня
+  // AUDIT f-dblclick [FIXED 2026-05-14] | Вместо confirm с default-OK (где промах на мобиле даёт
+  // удвоение) — prompt с обязательным вводом дополнительной суммы. Пустой ввод = отмена.
   const today = todayIso();
   const already = state.transactions.find(t => t.type === 'income' && t.incomeId === incomeId && t.date === today);
   if (already) {
-    if (!confirm(`За сегодня уже зафиксировано ${fmt(already.amount)} по «${inc.name}». Добавить ещё одну запись?`)) return;
+    const more = prompt(
+      `За сегодня уже зафиксировано ${fmt(already.amount)} по «${inc.name}».\n\n` +
+      `Если пришло ещё — введи ДОПОЛНИТЕЛЬНУЮ сумму в ${symbol} ${curr}.\nЧтобы отменить — оставь поле пустым или нажми «Отмена».`,
+      ''
+    );
+    if (more === null || more.trim() === '') return;
+    const extraNative = parseAmount(more);
+    if (!isFinite(extraNative) || extraNative <= 0) { alert('Некорректная сумма — отменено.'); return; }
+    pushDailyIncomeTx(inc, today, extraNative, toRub(extraNative, curr), curr);
+    save();
+    renderAll();
+    toast(`+ ${extraNative} ${symbol} · ${inc.name} (доп.)`, 'good');
+    return;
   }
 
   pushDailyIncomeTx(inc, today, amtNative, amtRub, curr);
@@ -2796,38 +2833,57 @@ function addExpense() {
 // "лишнюю подушку" и тратит. То же у findPendingCreditDeductions и findPendingIncomes.
 // Фикс: итерировать от min(today, createdDate, today-3 months) до сегодня. См. code-review.html#f-pending.
 function findPendingDeductions() {
+  // AUDIT P0-11 [FIXED 2026-05-14] | Итерируем последние 3 месяца включая текущий, чтобы
+  // догнать пропущенные подтверждения (если не открывал app март-апрель-май, по аренде
+  // покажется 3 списания, не одно). Каждое — отдельная запись pending с своим monthKey.
   const today = new Date();
-  const todayYm = currentMonthKey();
   const pending = [];
+  const monthsToCheck = [];
+  for (let i = 3; i >= 0; i--) {
+    const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
+    monthsToCheck.push({
+      ym: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+      year: d.getFullYear(),
+      monthIdx: d.getMonth()
+    });
+  }
 
   (state.expenses || []).forEach(exp => {
     if (!exp.balanceId || !exp.payDay) return;
     if (!Array.isArray(exp.deductionLog)) exp.deductionLog = [];
-    if (exp.deductionLog.includes(todayYm)) return; // уже обработано в этом месяце
-    if (Array.isArray(exp.skippedMonths) && exp.skippedMonths.includes(todayYm)) return;
-    if (isExpenseFinishedForDate(exp, today)) return;
+    const skipped = Array.isArray(exp.skippedMonths) ? exp.skippedMonths : [];
 
-    const payDayThisMonth = clampDayToMonth(exp.payDay, today.getFullYear(), today.getMonth());
-    if (today.getDate() < payDayThisMonth) return; // ещё не время
+    monthsToCheck.forEach(mc => {
+      if (exp.deductionLog.includes(mc.ym)) return; // подтверждено
+      if (skipped.includes(mc.ym)) return; // пропущено пользователем
+      const startOfMonth = new Date(mc.year, mc.monthIdx, 1);
+      if (isExpenseFinishedForDate(exp, startOfMonth)) return;
 
-    const bal = state.balances.find(b => b.id === exp.balanceId);
-    if (!bal) return;
+      const payDayThisMonth = clampDayToMonth(exp.payDay, mc.year, mc.monthIdx);
+      const payDate = new Date(mc.year, mc.monthIdx, payDayThisMonth);
+      payDate.setHours(0, 0, 0, 0);
+      if (payDate > today) return; // ещё не наступило
 
-    const deduct = typeof exp.balanceDeductPerMonth === 'number'
-      ? exp.balanceDeductPerMonth
-      : fromRub(exp.amount, bal.currency);
+      const bal = state.balances.find(b => b.id === exp.balanceId);
+      if (!bal) return;
 
-    pending.push({
-      expId: exp.id,
-      balId: bal.id,
-      name: exp.name,
-      payDay: payDayThisMonth,
-      todayDay: today.getDate(),
-      overdueDays: today.getDate() - payDayThisMonth,
-      amount: deduct,
-      currency: bal.currency,
-      balanceName: bal.name,
-      monthKey: todayYm,
+      const deduct = typeof exp.balanceDeductPerMonth === 'number'
+        ? exp.balanceDeductPerMonth
+        : fromRub(exp.amount, bal.currency);
+
+      const overdueDays = Math.floor((today - payDate) / (24 * 3600 * 1000));
+      pending.push({
+        expId: exp.id,
+        balId: bal.id,
+        name: exp.name,
+        payDay: payDayThisMonth,
+        todayDay: today.getDate(),
+        overdueDays: overdueDays,
+        amount: deduct,
+        currency: bal.currency,
+        balanceName: bal.name,
+        monthKey: mc.ym,
+      });
     });
   });
 
@@ -2851,8 +2907,32 @@ function applyDeduction(expId, monthKey) {
   const deduct = typeof exp.balanceDeductPerMonth === 'number'
     ? exp.balanceDeductPerMonth
     : fromRub(exp.amount, bal.currency);
+  // AUDIT P0-13 [FIXED 2026-05-14] | Confirm на минус (как в addExpense).
+  if (bal.amount < deduct) {
+    if (!confirm(`На «${bal.name}» только ${fmtCur(bal.amount, bal.currency)}, а нужно списать ${fmtCur(deduct, bal.currency)}. Баланс уйдёт в минус. Продолжить?`)) return false;
+  }
   bal.amount = Math.round((bal.amount - deduct) * 100) / 100;
   exp.deductionLog.push(monthKey);
+  // AUDIT P0-12 [FIXED 2026-05-14] | Создаём транзакцию в state.transactions — расход теперь виден
+  // в ленте, графиках, среднем чеке, экспорте. Дата — день списания внутри monthKey (YYYY-MM).
+  const [yy, mm] = monthKey.split('-');
+  const yNum = parseInt(yy, 10), mNum = parseInt(mm, 10) - 1;
+  const dayInMonth = clampDayToMonth(exp.payDay || 1, yNum, mNum);
+  const txDate = `${yy}-${mm}-${String(dayInMonth).padStart(2, '0')}`;
+  const amountRub = typeof exp.amount === 'number' ? exp.amount : toRub(deduct, bal.currency);
+  state.transactions.push({
+    id: safeId(),
+    type: 'expense',
+    date: txDate,
+    name: exp.name,
+    amount: Math.round(amountRub * 100) / 100,
+    cat: exp.cat || '🏠 Жильё',
+    balanceId: bal.id,
+    nativeAmount: deduct,
+    nativeCurrency: bal.currency,
+    source: 'auto-deduction',
+    bad: false
+  });
   save();
   return true;
 }
@@ -2945,8 +3025,12 @@ function applyCreditDeduction(crId, chargeKey) {
   const bal = state.balances.find(b => b.id === cr.balanceId);
   if (!bal) return false;
   const deduct = fromRub(cr.monthly || 0, bal.currency);
+  // AUDIT P0-13 [FIXED 2026-05-14] | Confirm на минус-баланс (как в applyDeduction/addExpense).
+  if (bal.amount < deduct) {
+    if (!confirm(`На «${bal.name}» только ${fmtCur(bal.amount, bal.currency)}, а платёж по «${cr.name}» — ${fmtCur(deduct, bal.currency)}. Баланс уйдёт в минус. Продолжить?`)) return false;
+  }
   bal.amount = Math.round((bal.amount - deduct) * 100) / 100;
-  // Остаток долга уменьшается на сумму платежа в рублях (приближённо, без учёта %)
+  // Остаток долга уменьшается на сумму платежа в рублях (приближённо, без учёта % — см. P0-4)
   cr.total = Math.max(0, Math.round(((cr.total || 0) - (cr.monthly || 0)) * 100) / 100);
   cr.deductionLog.push(chargeKey);
   save();
@@ -2984,7 +3068,8 @@ function payCreditNow(crId) {
   // долг тоже минус 10. Везде по проекту канон — parseAmount() (он убирает пробелы и NBSP).
   // Плюс параллельно баг: тут не пушится транзакция в state.transactions (как в applyDeduction).
   // См. code-review.html#f-paycredit.
-  const amt = parseFloat(String(input).replace(',', '.'));
+  // AUDIT P0-16 [FIXED 2026-05-14] | parseAmount убирает пробелы/NBSP — "10 000" парсится как 10000.
+  const amt = parseAmount(input);
   if (!isFinite(amt) || amt <= 0) { alert('Некорректная сумма.'); return; }
   if (cr.balanceId) {
     const bal = state.balances.find(b => b.id === cr.balanceId);
@@ -4321,8 +4406,9 @@ function renderDashboard() {
   // тоже плюсуются. totalCredits() выше считает правильно — на одном дашборде total и breakdown
   // расходятся. Должно быть: activeCredits().forEach(c => cats[...] += creditMonthlyEq(c)).
   // См. code-review.html#f-cats-credit.
-  state.credits.forEach(c => {
-    cats['🏦 Кредиты'] = (cats['🏦 Кредиты'] || 0) + c.monthly;
+  // AUDIT P0-15 [FIXED 2026-05-14] | activeCredits + creditMonthlyEq для weekly/biweekly + фильтр paused.
+  activeCredits().forEach(c => {
+    cats['🏦 Кредиты'] = (cats['🏦 Кредиты'] || 0) + creditMonthlyEq(c);
   });
   
   const totalSpend = exp + cr + txExp;
@@ -4601,13 +4687,11 @@ function renderPastPaycheck() {
   const horizonBack = new Date(today.getFullYear(), today.getMonth() - 2, 1);
   (state.incomes || []).forEach(inc => {
     if (inc.freq !== 'semimonthly' && inc.freq !== 'monthly') return;
-    // AUDIT P0-14 | Для monthly читаем inc.payDay, которого В СХЕМЕ НЕТ — есть только
+    // AUDIT P0-14 [FIXED 2026-05-14] | Для monthly читаем inc.payDay, которого В СХЕМЕ НЕТ — есть только
     // inc.payDays (массив). Для monthly-зарплат payDays.length === 0 → ранний return →
     // блок "План прошлой выплаты vs Факт" молча скрыт без ошибки в консоли. Для semimonthly
     // работает. Фикс: всегда читать inc.payDays. См. code-review.html#f-paydays.
-    const payDays = inc.freq === 'monthly'
-      ? (inc.payDay ? [inc.payDay] : [])
-      : (Array.isArray(inc.payDays) ? inc.payDays : []);
+    const payDays = Array.isArray(inc.payDays) ? inc.payDays : [];
     if (payDays.length === 0) return;
     let cur = new Date(horizonBack);
     while (cur <= today) {
