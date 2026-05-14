@@ -691,6 +691,9 @@
 <!-- DASHBOARD -->
 <div id="page-dashboard" class="page active">
 
+  <!-- LAST ENTRY HINT — показывает дату последней введённой транзакции и подсвечивает пропуски -->
+  <div id="dash-last-entry" style="display:none;margin-bottom:12px;padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.4"></div>
+
   <!-- TODAY vs YESTERDAY -->
   <div class="card" id="today-compare-card" style="background:linear-gradient(135deg,#1a1530 0%,#0d1f2d 100%);border-color:#2d2450;margin-bottom:16px">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">
@@ -1587,7 +1590,8 @@ let state = {
   // Это только для ПЕРВОЙ установки — на вкладке «Балансы» пользователь переписывает.
   // Долгосрочно правильно — fetch при первом запуске + индикатор «курс не обновлялся N дней».
   rates: { USD: 75, USDT: 75 },
-  lastImport: null
+  lastImport: null,
+  userRules: []     // правила автокатегоризации, заданные пользователем через UI «Переразметить контрагентов». { key, cat, createdAt }
 };
 
 // AUDIT P0-5 [FIXED 2026-05-14] | save() обёрнут в try/catch + блокировка через __SAVE_BLOCKED__,
@@ -1619,7 +1623,7 @@ function load() {
       // 1. Берём всё, что было сохранено, поверх дефолтов
       // AUDIT P0-8 [FIXED 2026-05-14] | Whitelist разрешённых ключей — мусор/фантомы из бэкапа
       // в state не попадают. При будущем переименовании поля добавь шаг миграции ниже.
-      const ALLOWED_KEYS = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances', 'rates', 'lastImport'];
+      const ALLOWED_KEYS = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances', 'rates', 'lastImport', 'userRules'];
       ALLOWED_KEYS.forEach(k => {
         if (parsed[k] !== undefined) state[k] = parsed[k];
       });
@@ -1632,6 +1636,7 @@ function load() {
       if (!Array.isArray(state.goals)) state.goals = [];
       if (!Array.isArray(state.habits)) state.habits = [];
       if (!Array.isArray(state.balances)) state.balances = [];
+      if (!Array.isArray(state.userRules)) state.userRules = [];
       if (!state.rates || typeof state.rates !== 'object') state.rates = { USD: 75, USDT: 75 };
       // AUDIT P0-1 [FIXED 2026-05-14] | Парсинг строк + позитивный fallback. Дефолт 75 (см. строку 1586).
       ['USD', 'USDT'].forEach(cur => {
@@ -4266,8 +4271,57 @@ function renderRecentTransactions() {
   wrap.innerHTML = html;
 }
 
+// Возвращает ISO-дату (YYYY-MM-DD) самой свежей транзакции пользователя, либо null если транзакций нет.
+function getLastTransactionDate() {
+  if (!Array.isArray(state.transactions) || state.transactions.length === 0) return null;
+  let max = null;
+  for (const t of state.transactions) {
+    if (t && t.date && (max === null || t.date > max)) max = t.date;
+  }
+  return max;
+}
+
+// Рисует плашку «Последняя запись: DD.MM.YYYY (N дней назад)» с подсветкой пропусков.
+function renderLastEntryHint() {
+  const el = document.getElementById('dash-last-entry');
+  if (!el) return;
+  const last = getLastTransactionDate();
+  if (!last) {
+    el.style.display = 'none';
+    return;
+  }
+  // diffDays = сколько ПОЛНЫХ дней между последней записью и сегодня
+  const todayMs = new Date(todayIso()).getTime();
+  const lastMs = new Date(last).getTime();
+  const diffDays = Math.round((todayMs - lastMs) / (1000 * 60 * 60 * 24));
+  // Формат "14.05.2026"
+  const parts = last.split('-');
+  const human = `${parts[2]}.${parts[1]}.${parts[0]}`;
+
+  let bg, color, text;
+  if (diffDays <= 0) {
+    bg = '#0e2a1a'; color = '#4fffb0';
+    text = `✓ Последняя запись: <strong>сегодня</strong> (${human})`;
+  } else if (diffDays === 1) {
+    bg = '#1e2435'; color = '#b0b8d0';
+    text = `Последняя запись: <strong>вчера</strong> (${human})`;
+  } else if (diffDays <= 7) {
+    bg = '#2a2412'; color = '#ffc870';
+    text = `⚠️ Последняя запись: <strong>${diffDays} дн. назад</strong> (${human}). Возможно есть пропуски — дополни из выписки во вкладке «📥 Импорт».`;
+  } else {
+    bg = '#2a1820'; color = '#ff8a8a';
+    text = `🔴 Последняя запись: <strong>${diffDays} дн. назад</strong> (${human}). Большой пропуск — обязательно дополни через «📥 Импорт» из банковской выписки, иначе средний чек посчитается неверно.`;
+  }
+  el.style.background = bg;
+  el.style.color = color;
+  el.style.border = '1px solid ' + color + '40';
+  el.innerHTML = text;
+  el.style.display = 'block';
+}
+
 function renderDashboard() {
   renderHeaderDate();
+  renderLastEntryHint();
   renderTodayCompare();
   renderRecentTransactions();
 
@@ -5723,32 +5777,80 @@ function renderTips() {
 
 // ===== ИМПОРТ ВЫПИСКИ =====
 
-// Правила автокатегоризации по ключевым словам в описании операции
+// Правила автокатегоризации по ключевым словам в описании операции.
+// Порядок ВАЖЕН: первое совпадение выигрывает. Более специфичные ключи держим выше менее специфичных.
+// Пользовательские правила из state.userRules проверяются ПЕРЕД этим списком в autoCategorize() —
+// они приоритетнее и переживают обновления приложения.
 const CATEGORY_RULES = [
-  // 🔄 Между своими — категория для ВНУТРИАППОВЫХ переводов между балансами (convertBetweenBalances).
-  // Банковские "Между своими счетами" (Tinkoff Black → накопительный) сюда НЕ мапятся — это другая
-  // реальность: банк со своими внутренностями, а наши state.balances — пользовательская организация.
-  // Если в импорте такие операции встретятся — попадут в '📦 Разное' (по умолчанию чекнутые),
-  // и пользователь снимает галочку вручную в превью.
-  { cat: '🔄 Между своими', keywords: ['внутренний перевод', 'внутрибанковский перевод', 'перевод между счетами', 'перевод на свой', 'собственный счет', 'собственный счёт'] },
-  // 💸 Переводы другим — это реальные расходы (подруге, друзьям, мастерам и т.п.)
-  { cat: '💸 Переводы', keywords: ['внешний перевод', 'перевод по номеру телефона', 'перевод по номеру карты', 'сбп перевод', 'система быстрых платежей', 'c2a', 'yandexbank_c2a', 'mbank.mts'] },
-  { cat: '💵 Наличные', keywords: ['снятие наличных', 'atm', 'банкомат', 'выдача наличных'] },
-  { cat: '🍔 Еда', keywords: ['пятёрочк', 'пятерочк', 'магнит', 'перекрёсток', 'перекресток', 'ашан', 'лента', 'вкусвилл', 'vkusvill', 'метро', 'дикси', 'mcdonald', 'kfc', 'burger', 'додо', 'subway', 'starbucks', 'шоколадниц', 'кофе', 'ресторан', 'кафе', 'delivery', 'яндекс.еда', 'yandex eda', 'самокат', 'samokat', 'сбермаркет', 'яндекс.лавка', 'azbuka', 'бакалея', 'shaurma', 'kafe', 'pekarnya', 'produkty', 'krosh', 'bannyy kompleks', 'promore', 'cyclo', 'winelab', 'lime moscow', 'lime.', 'v. gosti', 'в. гости', 'ddx'] },
-  { cat: '🚗 Транспорт', keywords: ['такси', 'taxi', 'uber', 'яндекс.такси', 'yandex taxi', 'yandex.go', 'yandex*fasten', 'ym *fasten', 'berizaryad', 'beri zaryad', 'citymobil', 'gett', 'metro', 'метрополитен', 'автобус', 'тройка', 'беларус', 'азс', 'заправк', 'лукойл', 'газпром', 'роснефть', 'shell', 'bp', 'каршеринг', 'делимобиль', 'яндекс.драйв', 'самокат прокат', 'whoosh', 'urent'] },
-  { cat: '📱 Подписки', keywords: ['netflix', 'spotify', 'apple.com', 'itunes', 'icloud', 'google play', 'youtube', 'яндекс.плюс', 'yandex plus', 'кинопоиск', 'ivi', 'okko', 'мтс music', 'amediateka', 'vk combo', 'gpt', 'chatgpt', 'adobe', 'microsoft', 'подписка', 'figma', 'notion'] },
-  { cat: '🏠 Жильё', keywords: ['жкх', 'квартплат', 'жкx', 'коммуналк', 'ук ', 'управляющ', 'мосэнерго', 'водоканал', 'электр', 'газ', 'аренд', 'ипотек', 'домофон', 'капремонт'] },
+  // 🔄 Между своими — банковские переборки (Tinkoff Black ↔ накопительный, ИП → личный, ты сам на свой
+  // другой банк). При импорте в превью эта категория по умолчанию СНЯТА с галочки, а в applyImportAsHistory
+  // явно пропускается, чтобы не задвоить деньги. Не путать с внутриаппным convertBetweenBalances.
+  { cat: '🔄 Между своими', keywords: ['внутренний перевод', 'внутрибанковский перевод', 'перевод между счетами', 'перевод на свой', 'собственный счет', 'собственный счёт', 'между своими', 'пополнение. индивидуальный предприниматель чумак', 'даниэл ч', 'даниил ч', 'daniel ч'] },
+  { cat: '💵 Наличные', keywords: ['снятие наличных', 'atm', 'выдача наличных', 'снятие в банкомат', 'внесение наличных через банкомат'] },
+  // 💳 Рассрочка — частичные платежи по уже совершённым покупкам. Решение «включать или нет» — твоё.
+  { cat: '💳 Рассрочка', keywords: ['долями', 'яндекс пэй split', 'split', 'рассрочк', 'оплата частями'] },
+  // Точечные правила-имена: владелец явно подтвердил эти контрагенты
+  { cat: '💇 Барбершоп', keywords: ['нельсон а', 'барбершоп', 'barbershop'] },
+  { cat: '💕 Девушка', keywords: ['арина б'] },
+  // 💄 Красота — салоны, маникюр, косметология (без слова «салон» одиноко, чтобы не цеплять автосалоны)
+  { cat: '💄 Красота', keywords: ['салон красоты', 'золотое яблоко', 'ip avetisyan', 'avetisyan', 'карбестоп', 'педикюр', 'маникюр', 'epil', 'эпил', 'lash', 'brow', 'нейл'] },
+  // 🐈 Питомец — ветеринар, зоомагазин
+  { cat: '🐈 Питомец', keywords: ['vetgospital', 'vetradiologiya', 'zootovary', 'mokryy nos', 'ветеринар', 'ветклиник', 'зоомагазин', 'зоотовар'] },
+  // 🚕 Такси
+  { cat: '🚕 Такси', keywords: ['такси', 'taxi', 'yandex fasten', 'yandex*fasten', 'ym *fasten', 'яндекс такси', 'яндекс.такси', 'yandex.go', 'yandex go', 'uber', 'citymobil', 'gett', 'maxim'] },
+  // 🛴 Самокаты — аренда. ВАЖНО: ключ 'самокаты' (с 'ы') матчит "Самокаты - Яндекс Go". Стоит ВЫШЕ 🍔 Еды,
+  // чтобы поймать первым. А слово 'самокат' (без 'ы') остаётся в 🍔 Еде — это сберовский супермаркет «Самокат-доставка».
+  { cat: '🛴 Самокаты', keywords: ['whoosh', 'мтс юрент', 'urent', 'самокаты', 'lite самокат'] },
+  // 🚇 Транспорт — метро/автобус/каршеринг/АЗС/парковка. БЕЗ слова «metro» одиноко — раньше пожирало гипермаркет
+  { cat: '🚇 Транспорт', keywords: ['московский метрополитен', 'метрополитен', 'тройка', 'автобус', 'троллейбус', 'трамвай', 'электричк', 'каршеринг', 'делимобиль', 'яндекс.драйв', 'белк акар', 'азс ', 'заправк', 'лукойл', 'газпромнефть', 'роснефть', 'shell', 'bp заправ', 'трасса', 'парковк', 'паркинг'] },
+  // 🍷 Алкоголь — отдельно от еды, чтобы видеть свою водочную статью
+  { cat: '🍷 Алкоголь', keywords: ['винлаб', 'winelab', 'хмель и солод', 'khmel i solod', 'красное и белое', 'алкомаркет', 'бристоль'] },
+  // 🍔 Еда — супермаркеты, кафе, доставка. Ключ 'самокат' (без 'ы') = супермаркет «Самокат-доставка»;
+  // аренда «Самокаты ...» (с 'ы') уже отлавливается выше в 🛴 Самокатах. 'метро' заменено на 'метро cash'
+  // (раньше пожирало метрополитен), 'ddx' убран (теперь в 💪 Спорт), 'krosh' → 'крошки' кириллицей.
+  { cat: '🍔 Еда', keywords: ['пятёрочк', 'пятерочк', 'магнит', 'перекрёсток', 'перекресток', 'ашан', 'лента', 'вкусвилл', 'vkusvill', 'метро cash', 'дикси', 'mcdonald', 'kfc', 'burger', 'додо', 'subway', 'starbucks', 'шоколадниц', 'кофе', 'ресторан', 'кафе', 'delivery', 'яндекс.еда', 'yandex eda', 'яндекс еда', 'самокат', 'сбермаркет', 'яндекс.лавка', 'яндекс лавка', 'azbuka', 'азбука', 'бакалея', 'shaurma', 'шаурма', 'kafe', 'pekarnya', 'produkty', 'продукты', 'крошки', 'pekarn', 'булочн', 'bannyy kompleks', 'promore', 'промор', 'cyclo', 'lime moscow', 'v. gosti', 'в. гости', 'в гости', 'maran', 'буханка', 'narnia', 'geisha', 'vasilchuki', 'eat & split', 'sabz', 'starhit', 'р боcси', 'р босси', 'r bossi', 'self kiosk', 'feshn trend', 'feshen trend', 'продуктовый магазин', 'ip yeremina', 'yeremina', 'kut\'in'] },
+  // 📱 Подписки — стриминги, мессенджеры, операторы связи
+  { cat: '📱 Подписки', keywords: ['netflix', 'spotify', 'apple.com', 'itunes', 'icloud', 'google play', 'youtube', 'яндекс.плюс', 'яндекс плюс', 'yandex plus', 'yandex.plus', 'кинопоиск', 'ivi', 'okko', 'мтс music', 'amediateka', 'vk combo', 'gpt', 'chatgpt', 'adobe', 'microsoft', 'подписк', 'figma', 'notion', 'telegram', 'getcontact', 'kinoflex', 'wink', 'премиум', 'premium', 'билайн', 'мегафон', 'beeline', 'megafon', 'tele2', 't2 моби'] },
+  // 🏠 Жильё — БЕЗ слова 'газ' (раньше пожирало "маГАЗин"). Используем точечные ключи.
+  { cat: '🏠 Жильё', keywords: ['жкх', 'квартплат', 'жкx', 'коммуналк', 'ук ', 'управляющ', 'мосэнерго', 'водоканал', 'электроэнерг', 'газпром межрег', 'газпром розн', 'газ дом', ' газ ', 'аренд', 'ипотек', 'домофон', 'капремонт', 'sagelyan', 'строительный магазин', 'ремонт и мебель'] },
+  // 💊 Здоровье
   { cat: '💊 Здоровье', keywords: ['аптек', 'pharmacy', 'горздрав', 'ригл', 'столичк', 'вита', 'клиник', 'медси', 'инвитро', 'хеликс', 'смартлаб', 'доктор'] },
-  { cat: '👗 Одежда', keywords: ['zara', 'h&m', 'uniqlo', 'bershka', 'pull&bear', 'lamoda', 'wildberries одежд', 'befree', 'sela', 'gloria', 'love republic', 'снеж', 'обувь', 'одежд'] },
-  { cat: '🎮 Развлечения', keywords: ['кино', 'cinema', 'театр', 'концерт', 'steam', 'playstation', 'xbox', 'game', 'игр', 'afisha', 'afish', 'okko билет', 'ozon билет', 'clubhouse'] },
-  { cat: '💪 Спорт', keywords: ['fitness', 'фитнес', 'world class', 'x-fit', 'спортмастер', 'decathlon', 'спорт', 'бассейн', 'йога', 'тренировк'] },
+  // 👗 Одежда — ключ 'lime' без пробела; конфликт с рестораном LIME Moscow исключён, потому что
+  // правило 🍔 Еды с ключом 'lime moscow' стоит ВЫШЕ и сработает первым для ресторанных строк.
+  { cat: '👗 Одежда', keywords: ['zara', 'h&m', 'uniqlo', 'bershka', 'pull&bear', 'lamoda', 'wildberries одежд', 'befree', 'sela', 'gloria', 'love republic', 'снеж', 'обувь', 'одежд', 'lime'] },
+  // 🎮 Развлечения — кино, концерты, игры. Убрано слово 'кино' одиноко (пожирало 'kinoflex')
+  { cat: '🎮 Развлечения', keywords: ['cinema', 'mori cinema', 'alfa-bank*mori', 'кинотеатр', 'театр', 'концерт', 'steam', 'playstation', 'xbox', 'game', 'игр', 'afisha', 'afish', 'okko билет', 'ozon билет', 'clubhouse'] },
+  // 💪 Спорт — DDX Fitness теперь сюда (было ошибочно в 🍔 Еда)
+  { cat: '💪 Спорт', keywords: ['ddx fitness', 'ddx ', 'fitness', 'фитнес', 'world class', 'x-fit', 'spiritfit', 'спортмастер', 'decathlon', 'бассейн', 'йога', 'тренировк'] },
   { cat: '🎓 Обучение', keywords: ['курс', 'skillbox', 'geekbrains', 'нетолог', 'udemy', 'coursera', 'яндекс.практ', 'edx', 'book', 'книг', 'литрес', 'labirint'] },
-  { cat: '✈️ Путешествия', keywords: ['aviasales', 'авиасейлс', 'kupibilet', 'купибилет', 'авиабилет', 'ржд', 'поезд', 'booking', 'airbnb', 'отель', 'hotel', 'туту', 'onetwotrip', 's7', 'аэрофлот', 'победа', 'utair', 'nordwind'] },
-  { cat: '🛒 Маркетплейсы', keywords: ['озон', 'ozon', 'wildberries', 'wb ', 'яндекс.маркет', 'yandex market', 'aliexpress', 'мвидео', 'dns', 'эльдорадо', 'citilink', 'ikea', 'леруа'] },
+  // ✈️ Путешествия — авиа/ЖД/отели + туроператоры (ИП Манелова — туроператор)
+  { cat: '✈️ Путешествия', keywords: ['aviasales', 'авиасейлс', 'kupibilet', 'купибилет', 'авиабилет', 'ржд', 'поезд', 'booking', 'airbnb', 'отель', 'hotel', 'туту', 'onetwotrip', 's7', 'аэрофлот', 'победа', 'utair', 'nordwind', 'манелова', 'туроператор', 'tez tour', 'pegas', 'fun&sun'] },
+  // 🛒 Маркетплейсы — добавлены: 'яндекс маркет' без точки, 'avito', store77
+  { cat: '🛒 Маркетплейсы', keywords: ['озон', 'ozon', 'wildberries', 'wb ', 'яндекс.маркет', 'яндекс маркет', 'yandex market', 'yandex маркет', 'aliexpress', 'мвидео', 'dns', 'эльдорадо', 'citilink', 'ikea', 'леруа', 'avito', 'авито', 'store77'] },
+  // 🌹 Цветы — Studiya V.Gosti (одноимённое кафе "В.Гости" уже выше в Еде)
+  { cat: '🌹 Цветы', keywords: ['studiya v.gosti', 'студия в.гости', 'цветы', 'flowers', 'букет', 'florist'] },
+  // ⚡️ Power-banks
+  { cat: '⚡️ Зарядка', keywords: ['бери заряд', 'beri zaryad', 'berizaryad'] },
+  // 💸 Переводы — общая категория для платежей людям/юр.лицам, не попавших в специфичные правила выше
+  { cat: '💸 Переводы', keywords: ['внешний перевод', 'перевод по номеру телефона', 'перевод по номеру карты', 'сбп перевод', 'система быстрых платежей', 'c2a', 'yandexbank_c2a', 'mbank.mts', 'перевод юридическому', 'перевод физическому'] },
+  // 💼 Бизнес — комиссии и обслуживание (отдельно от потребительских расходов)
+  { cat: '💼 Бизнес', keywords: ['комиссия за операц', 'плата за программу страхов', 'проценты по кредит', 'плата за обслуж'] },
+  // 🏦 Кредиты — обслуживание кредита (амортизация + досрочное погашение). Имя категории
+  // согласовано с существующим '🏦 Кредиты' в creditMonthlyEq/catColor — те же траты сольются в одну строку.
+  { cat: '🏦 Кредиты', keywords: ['досрочное погашение', 'регулярный платеж', 'получение кредита', 'погашение кредита'] },
+  // 💸 Чаевые — нетмонет (чаевые мастерам через QR), плюс конкретный мерчант «В Гости» без точки = кафе
+  { cat: '💸 Чаевые', keywords: ['нетмонет', 'netmonet'] },
 ];
 
 function autoCategorize(desc) {
   const s = (desc || '').toLowerCase();
+  // Пользовательские правила имеют ПРИОРИТЕТ над встроенными CATEGORY_RULES.
+  // Сюда правила пишет UI «Переразметить контрагентов» (см. applyContragentRules в impo)
+  if (Array.isArray(state.userRules)) {
+    for (const r of state.userRules) {
+      if (r && r.key && r.cat && s.includes(r.key)) return r.cat;
+    }
+  }
   for (const rule of CATEGORY_RULES) {
     for (const kw of rule.keywords) {
       if (s.includes(kw)) return rule.cat;
@@ -5760,24 +5862,49 @@ function autoCategorize(desc) {
 // Временный буфер распознанных транзакций — ждёт подтверждения перед сохранением
 let importBuffer = [];
 
-function importFile() {
+async function importFile() {
   const f = document.getElementById('imp-file').files[0];
   if (!f) { alert('Выбери файл выписки'); return; }
   const ext = f.name.split('.').pop().toLowerCase();
   const bank = document.getElementById('imp-bank').value;
-  const reader = new FileReader();
 
+  // Ленивая загрузка нужной библиотеки ДО чтения файла. Раньше пользователь жал на кнопку
+  // быстрее, чем CDN отдавал скрипт — и получал алерт «библиотека ещё не загрузилась».
+  const btn = document.querySelector('button[onclick*="importFile"]');
+  const btnText = btn ? btn.textContent : '';
+  try {
+    if (ext === 'csv' || ext === 'tsv' || ext === 'txt') {
+      if (!window.Papa) {
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ Загружаю парсер CSV…'; }
+        await window.ensurePapa();
+      }
+    } else if (ext === 'xlsx' || ext === 'xls') {
+      if (!window.XLSX) {
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ Загружаю парсер Excel…'; }
+        await window.ensureXLSX();
+      }
+    } else if (ext === 'pdf') {
+      if (!window.pdfjsLib) {
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ Загружаю парсер PDF…'; }
+        await window.ensurePdfJs();
+      }
+    } else {
+      alert('Неподдерживаемый формат: .' + ext);
+      return;
+    }
+  } catch (err) {
+    alert('Не удалось загрузить библиотеку для разбора (' + (err.message || 'ошибка') + '). Проверь интернет и попробуй снова.');
+    return;
+  } finally {
+    if (btn) { btn.disabled = false; if (btnText) btn.textContent = btnText; }
+  }
+
+  const reader = new FileReader();
   reader.onload = function(e) {
     try {
-      if (ext === 'csv' || ext === 'tsv' || ext === 'txt') {
-        parseCSV(e.target.result, bank);
-      } else if (ext === 'xlsx' || ext === 'xls') {
-        parseExcel(e.target.result, bank);
-      } else if (ext === 'pdf') {
-        parsePDF(e.target.result, bank);
-      } else {
-        alert('Неподдерживаемый формат: .' + ext);
-      }
+      if (ext === 'csv' || ext === 'tsv' || ext === 'txt') parseCSV(e.target.result, bank);
+      else if (ext === 'xlsx' || ext === 'xls') parseExcel(e.target.result, bank);
+      else if (ext === 'pdf') parsePDF(e.target.result, bank);
     } catch (err) {
       console.error(err);
       alert('Ошибка при разборе файла: ' + err.message);
@@ -6027,8 +6154,9 @@ function parseMoney(v) {
 
 // Какие категории отмечены галочкой для включения в расходы
 let importSelected = {};
-// Включать ли поступления как доход
-let importInclInc = true;
+// Включать ли поступления как доход. По умолчанию FALSE — доходы пользователь ведёт сам в state.incomes,
+// и автоматический импорт их продублирует. Включать только сознательно в чекбоксе.
+let importInclInc = false;
 
 // Анализ периода: сколько уникальных месяцев покрывает выписка
 function analyzeImport(rows) {
@@ -6174,7 +6302,8 @@ function previewImport(rows) {
   // По умолчанию: все категории выбраны, КРОМЕ "🔄 Между своими"
   importSelected = {};
   sortedCats.forEach(([cat]) => { importSelected[cat] = (cat !== '🔄 Между своими'); });
-  importInclInc = true;
+  // Доходы по умолчанию ВЫКЛЮЧЕНЫ — см. комментарий у объявления переменной выше
+  importInclInc = false;
 
   // Сохраняем метаинформацию в буфер
   importBuffer.period = period;
@@ -6295,18 +6424,86 @@ function renderImportPreview(rows, byCat, sortedCats, totalInc) {
     html += `</div>`;
   }
 
+  // ===== 5.5. Блок: переразметка контрагентов =====
+  // Группируем все expense-операции из '💸 Переводы' и '📦 Разное' по нормализованному desc.
+  // Юзер видит топ контрагентов, выбирает категорию из dropdown, нажимает «Применить» —
+  // правило пишется в state.userRules (приоритетнее CATEGORY_RULES), все строки группы
+  // переразмечаются, превью пересчитывается. Правило переживает обновления приложения.
+  const recatGroups = {};
+  importBuffer.forEach(r => {
+    if (r.type !== 'expense') return;
+    if (r.cat !== '💸 Переводы' && r.cat !== '📦 Разное') return;
+    const key = (r.desc || '').toLowerCase().trim().slice(0, 40);
+    if (!key) return;
+    if (!recatGroups[key]) recatGroups[key] = { key, name: r.desc, count: 0, sum: 0, currentCat: r.cat };
+    recatGroups[key].count += 1;
+    recatGroups[key].sum += r.amount;
+  });
+  const recatList = Object.values(recatGroups).sort((a, b) => b.sum - a.sum);
+  if (recatList.length > 0) {
+    // Список всех уникальных категорий — из встроенных правил + уже сохранённых пользовательских
+    const allCats = new Set(CATEGORY_RULES.map(r => r.cat));
+    (state.userRules || []).forEach(r => { if (r && r.cat) allCats.add(r.cat); });
+    allCats.add('📦 Разное');
+    const catOptions = Array.from(allCats).sort();
+
+    html += `<div class="card"><div class="card-title">🏷 Переразметить контрагентов</div>
+      <div class="alert">Эти контрагенты попали в «Переводы» или «Разное» — автокатегория их не распознала. Выбери категорию из списка — приложение запомнит и будет применять к будущим импортам этой выписки.</div>`;
+    recatList.forEach((g, i) => {
+      const safeKey = g.key.replace(/'/g, "\\'");
+      const opts = ['<option value="">— оставить как есть —</option>']
+        .concat(catOptions.map(c => `<option value="${esc(c)}">${esc(c)}</option>`))
+        .join('');
+      html += `<div style="margin-bottom:10px;padding:10px;background:var(--bg);border-radius:10px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:8px">
+          <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0">${esc(g.name)}</div>
+          <div style="font-size:12px;color:var(--muted);white-space:nowrap">${g.count}x · ${fmt(g.sum)}</div>
+        </div>
+        <select onchange="setContragentChoice('${safeKey}', this.value)" style="width:100%;padding:8px;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--text);font-size:13px">
+          ${opts}
+        </select>
+      </div>`;
+    });
+    html += `<button class="btn btn-primary" style="margin-top:8px" onclick="applyContragentRules()">✓ Применить разметку</button>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">Правила сохранятся в твоих настройках. При следующем импорте этой же выписки эти контрагенты сразу попадут в выбранные категории.</div>
+    </div>`;
+  }
+
   // ===== 6. Блок: применение =====
-  html += `<div class="card"><div class="card-title">Применить к бюджету</div>`;
+  // ПЕРВИЧНЫЙ путь — back-fill пропущенных дней в state.transactions. Доходы и месячный бюджет
+  // (state.incomes / state.expenses) пользователь ведёт сам, выписка их НЕ перезаписывает.
+  // Вторичный путь («СРЕДНИЕ») оставлен для случая первой настройки приложения, спрятан в details.
+  html += `<div class="card"><div class="card-title">Дополнить историю трат</div>
+    <div class="alert">Это <strong>back-fill</strong>: каждая операция выписки попадёт в «Ежедневные траты» со своей датой. Двойная защита от задвоения: (1) фильтр по дате — берём только то, что было ДО твоей последней ручной записи, (2) умный дедуп — даже на оставшемся пропускаем операции с такой же датой+суммой, как у уже существующих транзакций.</div>`;
+
+  // Фильтр по дате: подтягиваем lastUserTxDate из state. Если транзакций нет — пусто, импорт берёт всё.
+  const lastUserTx = getLastTransactionDate();
+  const cutoffDefault = lastUserTx || '';
+  const lastUserHuman = lastUserTx ? lastUserTx.split('-').reverse().join('.') : 'пока пусто';
+  html += `<div style="margin-bottom:14px;padding:12px;background:var(--bg);border-radius:10px">
+    <div style="font-size:13px;font-weight:600;margin-bottom:6px">📅 Импортировать только операции ДО даты</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.4">Твоя последняя ручная запись: <strong>${lastUserHuman}</strong>. По умолчанию ставим эту дату — всё, что в выписке раньше, безопасно добавится; всё, что в этот день и позже — пропустится, чтобы не задвоить уже введённые вручную траты. Можно изменить, если знаешь что делаешь.</div>
+    <input type="date" id="imp-cutoff-date" value="${esc(cutoffDefault)}" style="padding:8px 10px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit">
+    <label style="margin-left:8px;font-size:12px;color:var(--muted);cursor:pointer">
+      <input type="checkbox" id="imp-cutoff-disable" style="margin-right:4px;accent-color:var(--accent)"> импортировать всё (без фильтра)
+    </label>
+  </div>`;
+
   if (totalInc > 0) {
-    html += `<label style="margin-bottom:14px;display:flex;align-items:center;gap:10px;cursor:pointer">
-      <input type="checkbox" ${importInclInc ? 'checked' : ''} onchange="toggleImportInc()" style="width:18px;height:18px;accent-color:var(--accent)">
-      <span style="font-size:13px;flex:1">Добавить поступления как доход (~${fmt(totalIncPerMonth)}/мес)</span>
+    html += `<label style="margin-bottom:14px;display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+      <input type="checkbox" ${importInclInc ? 'checked' : ''} onchange="toggleImportInc()" style="width:18px;height:18px;accent-color:var(--accent);margin-top:2px">
+      <span style="font-size:13px;flex:1;line-height:1.4">Также добавить поступления как доход (~${fmt(totalIncPerMonth)}/мес).<br><span style="color:var(--muted);font-size:11px">По умолчанию ВЫКЛЮЧЕНО: доходы обычно ведёшь во вкладке «Доход», импорт их продублирует. Включи только если хочешь back-fill зарплат с реальными датами.</span></span>
     </label>`;
   }
-  html += `<button class="btn btn-primary" onclick="applyImportAsMonthly()">✓ Применить СРЕДНИЕ (${fmt(selectedExpPerMonth)}/мес)</button>
-    <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">Добавятся средние месячные расходы по выбранным категориям. Это реалистично отразит твой ежемесячный бюджет.</div>
-    <button class="btn btn-primary" style="margin-top:12px;background:#2a4a6f" onclick="applyImportAsHistory()">📜 Импортировать всю ИСТОРИЮ (${rows.length} операций)</button>
-    <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">Каждая операция выписки попадёт в «Ежедневные траты» с её реальной датой — появится память за прошлые месяцы. Полезно для подсчёта «среднего чека жизни» и графиков. Дубликаты пропускаются автоматически.</div>
+  html += `<button class="btn btn-primary" onclick="applyImportAsHistory()">📜 Дополнить пропущенные дни (${rows.length} операций)</button>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">Безопасно: повторный импорт той же выписки не задвоит траты.</div>
+    <details style="margin-top:18px">
+      <summary style="cursor:pointer;font-size:13px;color:var(--muted)">⚙️ Альтернатива: применить СРЕДНИЕ как бюджет (для первой настройки)</summary>
+      <div style="margin-top:10px;padding:12px;background:var(--bg);border-radius:10px">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5"><strong>⚠️ Перезапишет твой ежемесячный бюджет!</strong> Добавит по одной строке на категорию со средней суммой/мес в раздел «Ежемесячные расходы». Старые записи «(из выписки)» удалятся. Нужно только если ты ещё не настроил постоянные расходы вручную.</div>
+        <button class="btn btn-ghost" onclick="applyImportAsMonthly()" style="font-size:13px">✓ Применить СРЕДНИЕ (${fmt(selectedExpPerMonth)}/мес)</button>
+      </div>
+    </details>
     <button class="btn btn-ghost" style="margin-top:12px" onclick="cancelImport()">✕ Закрыть без изменений</button>
     </div>`;
 
@@ -6348,7 +6545,67 @@ function toggleImportInc() {
 function cancelImport() {
   importBuffer = [];
   importSelected = {};
+  importContragentChoices = {};
   document.getElementById('import-preview').innerHTML = '';
+}
+
+// Временный буфер выбора пользователя в блоке «Переразметить контрагентов».
+// Ключи — нормализованные desc (lowercase, trim, 40 chars), значения — выбранная категория.
+let importContragentChoices = {};
+
+function setContragentChoice(key, cat) {
+  if (cat) importContragentChoices[key] = cat;
+  else delete importContragentChoices[key];
+}
+
+// Применяет выбор пользователя: пишет правила в state.userRules, переразмечает importBuffer,
+// пересчитывает analytics и перерисовывает превью. Дубль правил — обновление, не плодим.
+function applyContragentRules() {
+  const choices = Object.entries(importContragentChoices);
+  if (choices.length === 0) {
+    alert('Ничего не выбрано. Открой dropdown у нужных контрагентов и выбери категорию.');
+    return;
+  }
+  let written = 0, retagged = 0;
+  if (!Array.isArray(state.userRules)) state.userRules = [];
+  choices.forEach(([key, cat]) => {
+    if (!key || !cat) return;
+    // Обновляем существующее правило или добавляем новое
+    const existing = state.userRules.find(r => r && r.key === key);
+    if (existing) {
+      existing.cat = cat;
+      existing.updatedAt = Date.now();
+    } else {
+      state.userRules.push({ key, cat, createdAt: Date.now() });
+    }
+    written++;
+    // Переразмечаем в текущем importBuffer все строки, чьё описание содержит ключ
+    importBuffer.forEach(r => {
+      if (r.type !== 'expense') return;
+      const s = (r.desc || '').toLowerCase();
+      if (s.includes(key)) {
+        r.cat = cat;
+        retagged++;
+      }
+    });
+  });
+  save();
+
+  // Пересчитываем аналитику и перерисовываем превью с обновлёнными категориями
+  const period = importBuffer.period || analyzeImport(importBuffer);
+  const analytics = computeAnalytics(importBuffer, period.monthCount);
+  importBuffer.period = period;
+  importBuffer.analytics = analytics;
+  const byCat = analytics.byCat;
+  const sortedCats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  // Новые категории — по умолчанию включены в подсчёт (кроме «🔄 Между своими» — это переборки)
+  sortedCats.forEach(([cat]) => {
+    if (importSelected[cat] === undefined) importSelected[cat] = (cat !== '🔄 Между своими');
+  });
+  importContragentChoices = {};
+  const totalInc = importBuffer.filter(r => r.type === 'income').reduce((s, r) => s + r.amount, 0);
+  renderImportPreview(importBuffer, byCat, sortedCats, totalInc);
+  alert(`Готово!\n\n${written} правил сохранено · ${retagged} операций переразмечено.\nПри следующем импорте этой выписки эти контрагенты автоматически попадут в выбранные категории.`);
 }
 
 // Применяем импорт: добавляем СРЕДНИЕ месячные расходы (не суммы за весь период)
@@ -6396,63 +6653,99 @@ function applyImportAsMonthly() {
   alert(`Готово! Добавлено СРЕДНИЕ за ${mc.toFixed(1)} мес: категорий расходов ${addedExp}${incAdded ? ', + доход ~' + fmt(incPerMonth) + '/мес' : ''}. Старые записи «(из выписки)» заменены.`);
   importBuffer = [];
   importSelected = {};
+  importContragentChoices = {};
   document.getElementById('import-preview').innerHTML = '';
   showPageDirect('dashboard');
 }
 
 // Импорт как ИСТОРИЯ: каждая операция попадает в state.transactions с реальной датой.
-// Даёт приложению «память» о прошлых тратах для среднего чека, графиков, ретроспективы.
+// Двойная защита от задвоения:
+//   1) фильтр по дате — берём ТОЛЬКО операции с date < cutoff (по умолчанию cutoff = lastUserTxDate),
+//      потому что эти дни пользователь уже мог заполнить вручную;
+//   2) умный дедуп — ключ ${date}|${Math.round(amount*100)}|${type} (БЕЗ имени), чтобы поймать
+//      «такси домой 500» (ручная) vs «Yandex Fasten 500» (выписка) в один день как один и тот же расход.
 function applyImportAsHistory() {
   if (!importBuffer || importBuffer.length === 0) return;
-  if (!confirm(`Импортировать все ${importBuffer.length} операций в историю транзакций?\n\nДубликаты (уже добавленные с тем же описанием/датой/суммой) пропустятся.`)) return;
 
-  // Существующие ключи для дедупа
-  const seen = new Set();
+  // Читаем фильтр по дате
+  const cutoffDisabled = !!document.getElementById('imp-cutoff-disable')?.checked;
+  const cutoffEl = document.getElementById('imp-cutoff-date');
+  const cutoff = cutoffDisabled ? null : (cutoffEl ? cutoffEl.value : null);
+
+  // Считаем сколько РЕАЛЬНО будем импортировать после фильтра, чтобы юзер видел честное число в confirm
+  const willImport = importBuffer.filter(r => {
+    if (cutoff && r.date && r.date >= cutoff) return false;
+    if (r.type === 'income' && importInclInc === false) return false;
+    if (r.type === 'expense' && r.cat === '🔄 Между своими' && importSelected['🔄 Между своими'] === false) return false;
+    return true;
+  }).length;
+
+  const cutoffHuman = cutoff ? cutoff.split('-').reverse().join('.') : null;
+  const cutoffMsg = cutoff
+    ? `Фильтр по дате: только операции ДО ${cutoffHuman} (всё с этой даты включительно пропустится).`
+    : '⚠️ Фильтр выключен — импортируем ВСЁ. Дубликаты будут отсеяны умным дедупом, но возможны коллизии.';
+  if (!confirm(`Импортировать ${willImport} операций (из ${importBuffer.length}) в историю транзакций?\n\n${cutoffMsg}\n\nДубликаты по полному совпадению (дата+название+сумма) И по умному ключу (дата+сумма) — пропустятся.`)) return;
+
+  // Полный ключ (старый дедуп, ловит точные совпадения)
+  const seenFull = new Set();
+  // Умный ключ: дата+сумма+тип (без имени) — ловит ручные записи под другим названием
+  const seenSmart = new Set();
   (state.transactions || []).forEach(t => {
-    seen.add(`${t.date}|${(t.name || '').trim().toLowerCase()}|${Math.round((t.amount || 0) * 100)}|${t.type || 'expense'}`);
+    const amt = Math.round((t.amount || 0) * 100);
+    const tp = t.type || 'expense';
+    seenFull.add(`${t.date}|${(t.name || '').trim().toLowerCase()}|${amt}|${tp}`);
+    seenSmart.add(`${t.date}|${amt}|${tp}`);
   });
 
-  let addedExp = 0, addedInc = 0, skipped = 0, skippedTransfers = 0;
+  let addedExp = 0, addedInc = 0, skippedDupFull = 0, skippedDupSmart = 0, skippedTransfers = 0, skippedByDate = 0, skippedIncomes = 0;
 
   importBuffer.forEach(r => {
-    // Пропускаем «между своими» если пользователь снял категорию
+    // 1) Фильтр по дате
+    if (cutoff && r.date && r.date >= cutoff) { skippedByDate++; return; }
+    // 2) Пропускаем «между своими» если пользователь снял категорию
     if (r.type === 'expense' && r.cat === '🔄 Между своими' && importSelected['🔄 Между своими'] === false) {
       skippedTransfers++;
       return;
     }
-    // Пропускаем доходы, если пользователь не включил их
-    if (r.type === 'income' && importInclInc === false) {
-      return;
-    }
-    const name = (r.desc || '').trim();
-    const key = `${r.date}|${name.toLowerCase()}|${Math.round((r.amount || 0) * 100)}|${r.type}`;
-    if (seen.has(key)) { skipped++; return; }
-    seen.add(key);
+    // 3) Пропускаем доходы, если пользователь не включил их
+    if (r.type === 'income' && importInclInc === false) { skippedIncomes++; return; }
 
-    const tType = r.type || 'expense';
+    const name = (r.desc || '').trim();
+    const amt = Math.round((r.amount || 0) * 100);
+    const tp = r.type || 'expense';
+    const keyFull = `${r.date}|${name.toLowerCase()}|${amt}|${tp}`;
+    const keySmart = `${r.date}|${amt}|${tp}`;
+    if (seenFull.has(keyFull)) { skippedDupFull++; return; }
+    if (seenSmart.has(keySmart)) { skippedDupSmart++; return; }
+    seenFull.add(keyFull);
+    seenSmart.add(keySmart);
+
     state.transactions.push({
       id: safeId(),
       date: r.date,
-      name: name || (tType === 'income' ? 'Поступление' : 'Операция'),
+      name: name || (tp === 'income' ? 'Поступление' : 'Операция'),
       amount: r.amount,
-      cat: r.cat || (tType === 'income' ? '💰 Доход' : autoCategorize(name)),
-      type: tType,
-      // Авто-помечаем «плохое» по ключевым словам — пользователь потом может снять вручную
-      bad: tType === 'expense' ? detectBadName(name) : false
+      cat: r.cat || (tp === 'income' ? '💰 Доход' : autoCategorize(name)),
+      type: tp,
+      bad: tp === 'expense' ? detectBadName(name) : false
     });
-    if (r.type === 'income') addedInc++;
+    if (tp === 'income') addedInc++;
     else addedExp++;
   });
 
   save();
   const parts = [];
-  if (addedExp) parts.push(`${addedExp} трат`);
-  if (addedInc) parts.push(`${addedInc} поступлений`);
-  if (skipped) parts.push(`${skipped} пропущено (дубли)`);
-  if (skippedTransfers) parts.push(`${skippedTransfers} переводов между своими скрыто`);
+  if (addedExp) parts.push(`✓ ${addedExp} трат добавлено`);
+  if (addedInc) parts.push(`✓ ${addedInc} поступлений добавлено`);
+  if (skippedByDate) parts.push(`📅 ${skippedByDate} пропущено по фильтру даты`);
+  if (skippedDupFull) parts.push(`= ${skippedDupFull} полных дублей пропущено`);
+  if (skippedDupSmart) parts.push(`≈ ${skippedDupSmart} вероятных дублей по дате+сумме пропущено`);
+  if (skippedTransfers) parts.push(`🔄 ${skippedTransfers} переборок между своими скрыто`);
+  if (skippedIncomes) parts.push(`💰 ${skippedIncomes} поступлений не импортировано (чекбокс)`);
   alert(`История импортирована!\n\n${parts.join('\n')}`);
   importBuffer = [];
   importSelected = {};
+  importContragentChoices = {};
   document.getElementById('import-preview').innerHTML = '';
   showPageDirect('dashboard');
 }
@@ -6550,7 +6843,7 @@ function importData() {
         // Сбрасываем state в дефолты со ВСЕМИ полями и заново загружаем
         state = {
           incomes: [], expenses: [], transactions: [], credits: [],
-          goals: [], habits: [], balances: [], rates: { USD: 75, USDT: 75 }, lastImport: null
+          goals: [], habits: [], balances: [], rates: { USD: 75, USDT: 75 }, lastImport: null, userRules: []
         };
         load();
         renderAll();
