@@ -1700,6 +1700,15 @@ button:focus, a:focus { outline: none; }
     </div>
   </div>
 
+  <!-- Кредитные карты — отдельная карточка (показывается только если они есть) -->
+  <div class="card" id="dash-ccards-card" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+      <div class="card-title" style="margin-bottom:0">💳 Кредитные карты</div>
+      <div id="dash-ccards-summary" style="font-size:11px;color:var(--muted)">—</div>
+    </div>
+    <div id="dash-ccards-list"></div>
+  </div>
+
   <!-- Разовые траты + Следующая выплата — компактные стат-карточки -->
   <div class="grid-2 stat-grid" style="margin-bottom:12px">
     <div class="card stat-card stat-card-txn">
@@ -2175,12 +2184,22 @@ button:focus, a:focus { outline: none; }
   <div class="card">
     <div class="card-title">Добавить баланс</div>
     <div class="form-group">
+      <label>Тип</label>
+      <select id="bal-kind" onchange="updateBalanceKindFields()">
+        <option value="cash">💰 Денежный счёт (карта, наличные, крипта)</option>
+        <option value="credit-card">💳 Кредитная карта (с лимитом и грейс-периодом)</option>
+      </select>
+      <div id="bal-kind-hint" style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">
+        Денежные счета считаются в подушке безопасности и общем балансе. Кредитные карты — нет: для них трекаются лимит, использованная часть и срок до конца грейса.
+      </div>
+    </div>
+    <div class="form-group">
       <label>Название (Тинькофф, Binance, Metamask, наличные…)</label>
       <input id="bal-name" type="text" placeholder="Например: Binance USDT">
     </div>
     <div class="grid-2">
-      <div class="form-group">
-        <label>Сумма</label>
+      <div class="form-group" id="bal-amount-wrap">
+        <label id="bal-amount-label">Сумма</label>
         <input id="bal-amount" type="number" step="0.01" placeholder="0">
       </div>
       <div class="form-group">
@@ -2190,6 +2209,16 @@ button:focus, a:focus { outline: none; }
           <option value="USD">$ Доллары</option>
           <option value="USDT">₮ USDT (крипта)</option>
         </select>
+      </div>
+    </div>
+    <div class="grid-2" id="bal-ccard-fields" style="display:none">
+      <div class="form-group">
+        <label>Лимит карты (₽)</label>
+        <input id="bal-limit" type="number" step="0.01" placeholder="500000">
+      </div>
+      <div class="form-group">
+        <label>Грейс заканчивается</label>
+        <input id="bal-grace" type="date">
       </div>
     </div>
     <div class="form-group">
@@ -2636,6 +2665,22 @@ function load() {
         if (!h.emoji) h.emoji = '🎯';
         if (!h.cat) h.cat = 'Привычка';
       });
+      // Кредитные карты: счёт с лимитом и грейс-периодом. amount хранит "доступный лимит"
+      // (т.е. limit − использовано). При списании уменьшается как обычный баланс, при погашении
+      // (внесении средств) — увеличивается обратно. В подушке (computeHealthScore) карты исключаются.
+      state.balances.forEach(b => {
+        if (!['cash', 'credit-card'].includes(b.kind)) b.kind = 'cash';
+        if (b.kind === 'credit-card') {
+          if (typeof b.limit !== 'number' || !isFinite(b.limit) || b.limit <= 0) {
+            // Если лимит не задан — фолбэк на текущий amount, чтобы не получить divide-by-zero
+            b.limit = Math.max(0, b.amount || 0);
+          }
+          if (!b.gracePeriodEnd || typeof b.gracePeriodEnd !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(b.gracePeriodEnd)) {
+            b.gracePeriodEnd = null;
+          }
+          if (!b.currency) b.currency = 'RUB'; // кредитки в РФ почти всегда рублёвые
+        }
+      });
     } catch (e) {
       // AUDIT P0-7 [FIXED 2026-05-14] | Сохраняем битую копию в отдельный ключ для recovery,
       // блокируем save() через __SAVE_BLOCKED__, показываем алерт пользователю с инструкцией.
@@ -2786,6 +2831,38 @@ function totalEarmarkedCovered() {
 }
 function freeIncome() { return Math.max(0, totalIncome() - earmarkedIncomeTotal()); }
 function uncoveredExpensesTotal() { return Math.max(0, totalExpenses() - totalEarmarkedCovered()); }
+
+// Месячный эквивалент дохода уже в РУБЛЯХ (monthlyIncome возвращает в валюте источника)
+function monthlyIncomeRub(i) { return toRub(monthlyIncome(i) || 0, i.currency || 'RUB'); }
+
+// Фактически полученный earmarked-доход в текущем календарном месяце для конкретного расхода.
+// Два источника подтверждённого факта (зависят от типа дохода):
+//   1) daily/weekdays: фиксируется через logIncomeForToday → пишет реальную сумму
+//      в state.transactions (type='income', incomeId=i.id, amount в ₽).
+//   2) monthly/semimonthly: подтверждается через confirmIncomeReceived → добавляет дату
+//      в i.paidLog; каждая запись = одна выплата на (planned) amount источника.
+// Чтобы не задвоить (если по ошибке использованы оба механизма за один месяц), берём максимум.
+function earmarkActualThisMonth(expenseId) {
+  const monthKey = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+  return (state.incomes || []).reduce((s, i) => {
+    if (i.earmarkedFor !== expenseId) return s;
+    const txSum = (state.transactions || [])
+      .filter(t => t.type === 'income' && t.incomeId === i.id && (t.date || '').startsWith(monthKey))
+      .reduce((acc, t) => acc + (t.amount || 0), 0);
+    const log = Array.isArray(i.paidLog) ? i.paidLog : [];
+    const logSum = log.filter(d => typeof d === 'string' && d.startsWith(monthKey)).length
+                   * toRub(i.amount || 0, i.currency || 'RUB');
+    return s + Math.max(txSum, logSum);
+  }, 0);
+}
+
+// Плановое поступление earmark за весь текущий месяц
+function earmarkPlannedThisMonth(expenseId) {
+  return (state.incomes || []).reduce((s, i) => {
+    if (i.earmarkedFor !== expenseId) return s;
+    return s + monthlyIncomeRub(i);
+  }, 0);
+}
 
 // Средний ежедневный «чек жизни» — средние реальные траты (transactions) на день
 // за период всей накопленной истории. Исключаются переводы между своими картами.
@@ -4494,27 +4571,86 @@ function deleteCredit(id) {
 }
 
 // ===== BALANCES =====
+// Хелперы для кредитных карт (kind='credit-card'):
+//  amount у такой карты хранит "доступный лимит" (limit − used).
+//  Списания/пополнения автоматически меняют amount, как у обычного баланса.
+function isCreditCard(b) { return b && b.kind === 'credit-card'; }
+function creditCardUsed(b) { return Math.max(0, (b.limit || 0) - (b.amount || 0)); }
+function creditCardLimit(b) { return b.limit || 0; }
+function creditCards() { return (state.balances || []).filter(isCreditCard); }
+function cashBalances() { return (state.balances || []).filter(b => !isCreditCard(b)); }
+function daysUntilGrace(b) {
+  if (!isCreditCard(b) || !b.gracePeriodEnd) return null;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const g = new Date(b.gracePeriodEnd + 'T00:00:00');
+  if (isNaN(g)) return null;
+  return Math.round((g - today) / (24 * 3600 * 1000));
+}
+
 function addBalance() {
   try {
+    const kindEl = document.getElementById('bal-kind');
+    const kind = kindEl ? kindEl.value : 'cash';
     const name = document.getElementById('bal-name').value.trim();
-    const amount = parseAmount(document.getElementById('bal-amount').value);
+    const amountRaw = parseAmount(document.getElementById('bal-amount').value);
     const currency = document.getElementById('bal-currency').value;
     let emoji = document.getElementById('bal-emoji').value.trim();
     if (!emoji) {
-      emoji = currency === 'RUB' ? '💳' : currency === 'USD' ? '💵' : '🪙';
+      if (kind === 'credit-card') emoji = '💳';
+      else emoji = currency === 'RUB' ? '💳' : currency === 'USD' ? '💵' : '🪙';
     }
     if (!name) { alert('Укажи название баланса'); return; }
-    if (isNaN(amount)) { alert('Укажи сумму (может быть 0)'); return; }
-    state.balances.push({
-      id: safeId(), name, emoji,
-      amount, currency
-    });
+
+    let entry = { id: safeId(), name, emoji, currency, kind };
+
+    if (kind === 'credit-card') {
+      const limit = parseAmount(document.getElementById('bal-limit').value);
+      const grace = (document.getElementById('bal-grace').value || '').trim();
+      if (isNaN(limit) || limit <= 0) { alert('Укажи лимит карты (например 500000)'); return; }
+      // По умолчанию у новой кредитки использовано столько, сколько ты ввёл в «Сумма».
+      // Если поле «Сумма» пустое/0 — лимит свободен полностью (доступно = limit).
+      const used = !isNaN(amountRaw) ? amountRaw : 0;
+      if (used < 0 || used > limit) { alert(`Использовано должно быть от 0 до ${fmt(limit)}`); return; }
+      entry.limit = limit;
+      entry.amount = limit - used;   // amount хранит "доступный лимит" — то, что ещё можно потратить
+      entry.gracePeriodEnd = grace && /^\d{4}-\d{2}-\d{2}$/.test(grace) ? grace : null;
+    } else {
+      if (isNaN(amountRaw)) { alert('Укажи сумму (может быть 0)'); return; }
+      entry.amount = amountRaw;
+    }
+
+    state.balances.push(entry);
     save();
     document.getElementById('bal-name').value = '';
     document.getElementById('bal-amount').value = '';
     document.getElementById('bal-emoji').value = '';
+    const limitEl = document.getElementById('bal-limit');
+    const graceEl = document.getElementById('bal-grace');
+    if (limitEl) limitEl.value = '';
+    if (graceEl) graceEl.value = '';
+    if (kindEl) kindEl.value = 'cash';
+    updateBalanceKindFields();
     renderAll();
   } catch (e) { console.error(e); alert('Ошибка: ' + e.message); }
+}
+
+function updateBalanceKindFields() {
+  const kind = (document.getElementById('bal-kind') || {}).value || 'cash';
+  const ccardFields = document.getElementById('bal-ccard-fields');
+  const amountLabel = document.getElementById('bal-amount-label');
+  const hint = document.getElementById('bal-kind-hint');
+  const currencyEl = document.getElementById('bal-currency');
+  if (kind === 'credit-card') {
+    if (ccardFields) ccardFields.style.display = '';
+    if (amountLabel) amountLabel.textContent = 'Уже использовано лимита (₽)';
+    if (currencyEl) { currencyEl.value = 'RUB'; currencyEl.disabled = true; }
+    if (hint) hint.textContent = 'Кредитные карты не идут в подушку безопасности. Трекаются лимит, использованная часть и грейс-период. Если сейчас на карте нет долга — оставь «Уже использовано» = 0.';
+  } else {
+    if (ccardFields) ccardFields.style.display = 'none';
+    if (amountLabel) amountLabel.textContent = 'Сумма';
+    if (currencyEl) currencyEl.disabled = false;
+    if (hint) hint.textContent = 'Денежные счета считаются в подушке безопасности и общем балансе. Кредитные карты — нет: для них трекаются лимит, использованная часть и срок до конца грейса.';
+  }
 }
 
 function deleteBalance(id) {
@@ -4529,6 +4665,17 @@ function deleteBalance(id) {
 function editBalanceAmount(id) {
   const b = state.balances.find(x => x.id === id);
   if (!b) return;
+  if (b.kind === 'credit-card') {
+    // У кредитки редактируем "использовано", а не "amount" (доступный лимит).
+    const usedNow = (b.limit || 0) - (b.amount || 0);
+    const cur = prompt(`«${b.name}» — сколько уже использовано (от 0 до ${fmt(b.limit || 0)}):`, usedNow);
+    if (cur === null) return;
+    const used = parseAmount(cur);
+    if (isNaN(used) || used < 0 || used > (b.limit || 0)) { alert('Должно быть от 0 до лимита'); return; }
+    b.amount = (b.limit || 0) - used;
+    save(); renderAll();
+    return;
+  }
   const cur = prompt(`Новая сумма баланса «${b.name}» (${curSym(b.currency)}):`, b.amount);
   if (cur === null) return;
   const n = parseAmount(cur);
@@ -4747,9 +4894,11 @@ function renderBalances() {
   if (!state.balances || state.balances.length === 0) {
     list.innerHTML = '<div class="empty-state"><div class="empty-icon">💼</div>Балансы не добавлены<br><span style="font-size:12px">Добавь карты, криптокошельки, наличные</span></div>';
   } else {
-    // Группируем по валюте
+    // Группируем по валюте (только денежные счета — кредитки рендерятся отдельной секцией)
+    const cashOnlyArr = (state.balances || []).filter(b => !isCreditCard(b));
+    const ccards = creditCards();
     const byCur = { RUB: [], USD: [], USDT: [] };
-    state.balances.forEach(b => { (byCur[b.currency] || (byCur[b.currency] = [])).push(b); });
+    cashOnlyArr.forEach(b => { (byCur[b.currency] || (byCur[b.currency] = [])).push(b); });
 
     let html = '';
     ['RUB', 'USD', 'USDT'].forEach(cur => {
@@ -4805,24 +4954,80 @@ function renderBalances() {
       });
       html += '</div>';
     });
+
+    // Подсекция «Кредитные карты» — с лимитом, used и грейсом, отдельно от кошельковой суммы.
+    if (ccards.length > 0) {
+      const totalUsed = ccards.reduce((s, c) => s + creditCardUsed(c), 0);
+      const totalLimit = ccards.reduce((s, c) => s + creditCardLimit(c), 0);
+      html += `<div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <div class="card-title" style="margin-bottom:0">💳 Кредитные карты</div>
+          <div style="text-align:right">
+            <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700;color:${totalUsed > 0 ? 'var(--accent2)' : 'var(--text)'}">${fmt(totalUsed)}<span style="font-size:11px;color:var(--muted);font-weight:400;letter-spacing:0"> / ${fmt(totalLimit)}</span></div>
+            <div style="font-size:11px;color:var(--muted)">использовано из лимита</div>
+          </div>
+        </div>
+        <div class="alert" style="margin-bottom:10px;font-size:11.5px;line-height:1.5">
+          Кредитный лимит не учитывается в общем балансе и подушке безопасности — это заёмные деньги. Использованную часть нужно вернуть до конца грейс-периода, чтобы не платить проценты.
+        </div>`;
+      ccards.forEach(b => {
+        const used = creditCardUsed(b);
+        const limit = creditCardLimit(b);
+        const usedPct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+        const tone = usedPct >= 80 ? 'var(--accent2)' : (usedPct >= 50 ? '#ff9f4f' : 'var(--accent)');
+        const daysLeft = daysUntilGrace(b);
+        let graceLine = '';
+        if (b.gracePeriodEnd) {
+          if (daysLeft === null) graceLine = '';
+          else if (daysLeft < 0) graceLine = `<div style="font-size:11px;color:var(--accent2);margin-top:4px">⛔ Грейс закончился ${Math.abs(daysLeft)} ${Math.abs(daysLeft) === 1 ? 'день' : 'дн.'} назад — пошли проценты</div>`;
+          else if (daysLeft <= 7) graceLine = `<div style="font-size:11px;color:var(--accent2);margin-top:4px">⚠️ До конца грейса ${daysLeft} ${daysLeft === 1 ? 'день' : 'дн.'} — нужно вернуть ${fmt(used)}</div>`;
+          else if (daysLeft <= 30) graceLine = `<div style="font-size:11px;color:#ff9f4f;margin-top:4px">⏳ До конца грейса ${daysLeft} дн.</div>`;
+          else graceLine = `<div style="font-size:11px;color:var(--muted);margin-top:4px">Грейс до ${b.gracePeriodEnd}</div>`;
+        }
+        html += `<div class="item-row" style="align-items:flex-start;flex-direction:column;gap:0">
+          <div style="display:flex;width:100%;justify-content:space-between;align-items:center">
+            <div class="item-left">
+              <div class="item-icon" style="background:var(--surface2)">${esc(b.emoji || '💳')}</div>
+              <div class="two-row">
+                <div class="item-name">${esc(b.name)}</div>
+                <div class="item-sub">доступно ${fmt(b.amount || 0)} из ${fmt(limit)}</div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:4px">
+              <button class="delete-btn" onclick="editBalanceAmount('${esc(b.id)}')" title="Изменить использованное">✎</button>
+              <div class="item-amount" style="color:${tone}">−${fmt(used)}</div>
+              <button class="delete-btn" onclick="deleteBalance('${esc(b.id)}')">✕</button>
+            </div>
+          </div>
+          <div style="width:100%;margin-top:8px">
+            <div class="progress-wrap"><div class="progress-bar" style="width:${usedPct}%;background:${tone}"></div></div>
+          </div>
+          ${graceLine}
+        </div>`;
+      });
+      html += '</div>';
+    }
+
     list.innerHTML = html;
   }
 
-  // Общий баланс
-  const totalRub = state.balances.reduce((s, b) => s + toRub(b.amount, b.currency), 0);
+  // Общий баланс — считаем только денежные счета, кредитные карты в общий баланс не идут
+  // (это лимит, а не деньги). Для карт ниже отдельная секция с used/limit/грейсом.
+  const cashList = cashBalances();
+  const totalRub = cashList.reduce((s, b) => s + toRub(b.amount, b.currency), 0);
   const totalEl = document.getElementById('bal-total');
   if (totalEl) totalEl.textContent = fmt(totalRub);
   const subEl = document.getElementById('bal-total-sub');
   const safetyPill = document.getElementById('bal-safety-pill');
   if (subEl) {
-    if (state.balances.length === 0) {
+    if (cashList.length === 0) {
       subEl.className = 'bal-dist-wrap empty';
       subEl.innerHTML = 'Добавь свои кошельки, карты, крипту — увидишь, как распределены деньги.';
       if (safetyPill) safetyPill.style.display = 'none';
     } else {
       subEl.className = 'bal-dist-wrap';
-      // Готовим сегменты, отсортированные по убыванию ₽-эквивалента
-      const segs = state.balances.map(b => ({
+      // Готовим сегменты только из денежных счетов (без кредиток)
+      const segs = cashList.map(b => ({
         id: b.id, name: b.name, emoji: b.emoji || '💳',
         currency: b.currency, amount: b.amount, rub: toRub(b.amount, b.currency),
       })).sort((a, b) => b.rub - a.rub);
@@ -4852,7 +5057,7 @@ function renderBalances() {
       const expMonth = totalExpenses() + totalCredits();
       const safetyMonths = expMonth > 0 ? (totalRub / expMonth) : 0;
       let summaryHTML = `<div class="bal-dist-summary">
-        <span>Распределение по <b>${state.balances.length}</b> ${state.balances.length === 1 ? 'счёту' : (state.balances.length < 5 ? 'счетам' : 'счетам')}</span>
+        <span>Распределение по <b>${cashList.length}</b> ${cashList.length === 1 ? 'счёту' : 'счетам'}</span>
         <span class="bal-dist-hint">Тапни сегмент или чип</span>
       </div>`;
 
@@ -5634,12 +5839,13 @@ function renderDashboard() {
   // Total balance card
   const balCard = document.getElementById('dash-balances-card');
   if (balCard) {
-    if (state.balances && state.balances.length > 0) {
-      const totalRub = state.balances.reduce((s, b) => s + toRub(b.amount, b.currency), 0);
+    const cashOnly = (state.balances || []).filter(b => !isCreditCard(b));
+    if (cashOnly.length > 0) {
+      const totalRub = cashOnly.reduce((s, b) => s + toRub(b.amount, b.currency), 0);
       document.getElementById('dash-balance-total').textContent = fmt(totalRub);
       const mthSafety = (exp + cr + goalsMonthly) > 0 ? (totalRub / (exp + cr + goalsMonthly)) : 0;
       document.getElementById('dash-balance-sub').innerHTML =
-        `На ${state.balances.length} счёт(ах) · ${mthSafety > 0 ? `хватит на ${mthSafety.toFixed(1)} мес обязательных расходов` : 'нет обязательных расходов для расчёта'}`;
+        `На ${cashOnly.length} счёт(ах) · ${mthSafety > 0 ? `хватит на ${mthSafety.toFixed(1)} мес обязательных расходов` : 'нет обязательных расходов для расчёта'}`;
       balCard.style.display = 'block';
     } else {
       balCard.style.display = 'none';
@@ -5753,7 +5959,8 @@ function computePaycheckAllocations() {
               kind: 'expense', name: e.name, amount: uncovered, date: ed, payDay: dday,
               hasBalance: !!e.balanceId,
               coverage: cov > 0 ? cov : 0,
-              fullAmount: e.amount || 0
+              fullAmount: e.amount || 0,
+              expenseId: e.id
             });
           }
         }
@@ -5831,11 +6038,31 @@ function renderPaycheckSplit() {
         const dLabel = o.date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
         const icon = o.kind === 'credit' ? '🏦' : '📅';
         const color = o.kind === 'credit' ? 'var(--accent2)' : '#ff9f4f';
-        const covNote = (o.kind === 'expense' && o.coverage > 0)
-          ? `<div style="font-size:11px;color:var(--accent);margin-top:2px;line-height:1.45" title="Зарезервированный доход — это доход, привязанный к этому расходу через вкладку «Доходы → Куда копится». Он копится фоном и автоматически уменьшает то, что нужно докинуть с зарплаты.">
+        // Базовая подпись о earmark-резервировании
+        let covNote = '';
+        if (o.kind === 'expense' && o.coverage > 0) {
+          covNote = `<div style="font-size:11px;color:var(--accent);margin-top:2px;line-height:1.45" title="Зарезервированный доход — это доход, привязанный к этому расходу через вкладку «Доходы → Куда копится». Он копится фоном и автоматически уменьшает то, что нужно докинуть с зарплаты.">
               💎 Полная сумма ${fmt(o.fullAmount)} ₽ — из них ${fmt(o.coverage)} ₽ уже копится фоновым доходом, доплатить с этой выплаты: <strong>${fmt(o.amount)} ₽</strong>
-            </div>`
-          : '';
+            </div>`;
+          // Дополнительная проверка факт vs план в этом календарном месяце:
+          // если earmark-доход (BitZone и т.п.) в этом месяце пришёл меньше планового —
+          // показываем красный алерт «недобор» с предложением закрыть его с другого счёта.
+          if (o.expenseId) {
+            const planned = earmarkPlannedThisMonth(o.expenseId);
+            const actual = earmarkActualThisMonth(o.expenseId);
+            const shortfall = Math.max(0, planned - actual);
+            if (planned > 0 && shortfall > 0) {
+              // Прогноз: до конца месяца ещё могут прийти выплаты, поэтому показываем как «риск», а не катастрофу,
+              // если факт > 0. Если actual=0 и месяц на излёте — это уже жёсткий недобор.
+              const isAlmostMonthEnd = daysLeftInMonth() <= 7;
+              const tone = (actual === 0 && isAlmostMonthEnd) ? 'var(--accent2)' : '#ff9f4f';
+              const icon = (actual === 0 && isAlmostMonthEnd) ? '⛔' : '⚠️';
+              covNote += `<div style="font-size:11px;color:${tone};margin-top:4px;line-height:1.45">
+                ${icon} В этом месяце по earmark-доходу пришло ${fmt(actual)} из плановых ${fmt(planned)} — недобор <strong>${fmt(shortfall)} ₽</strong>. Эту сумму придётся добить с другого счёта (балансы / кредитка), иначе расход не закроется полностью.
+              </div>`;
+            }
+          }
+        }
         const balNote = o.hasBalance
           ? '<span style="font-size:10px;color:var(--accent)">·авто</span>'
           : '<span style="font-size:10px;color:#ff9f4f" title="Не привязан к балансу">·вручную</span>';
@@ -8060,7 +8287,10 @@ function computeHealthScore() {
   const cr = totalCredits();
   const goalsMonthly = totalGoalsMonthly();
   const txExp = totalTransactionExpenses();
-  const balRub = (state.balances || []).reduce((s, b) => s + toRub(b.amount, b.currency), 0);
+  // Подушка безопасности считается ТОЛЬКО по денежным счетам — кредитные лимиты сюда не идут,
+  // это заёмные средства, а не сбережения. Использованный лимит кредитки фактически = долг.
+  const balRub = (state.balances || []).filter(b => !isCreditCard(b))
+    .reduce((s, b) => s + toRub(b.amount, b.currency), 0);
 
   if (inc === 0 && exp === 0 && cr === 0 && txExp === 0 && balRub === 0) {
     return { score: null, components: null };
@@ -8630,6 +8860,95 @@ function renderSubAudit() {
   document.getElementById('dash-subaudit-sum').textContent = `≈ ${fmt(monthlyTotal)}/мес · ${fmt(monthlyTotal * 12)}/год`;
 }
 
+// Виджет «Кредитные карты» на дашборде — used/limit + расчёт «вернуть X ₽ с каждой выплаты до грейса»
+function renderCreditCards() {
+  const card = document.getElementById('dash-ccards-card');
+  const list = document.getElementById('dash-ccards-list');
+  const sumEl = document.getElementById('dash-ccards-summary');
+  if (!card || !list) return;
+  const ccards = creditCards();
+  if (ccards.length === 0) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+
+  // Считаем сколько pay-day'ев между today и grace, по всем источникам дохода
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const paychecksUntil = graceDate => {
+    if (!graceDate) return 0;
+    const limitDate = new Date(graceDate + 'T23:59:59');
+    if (isNaN(limitDate) || limitDate < today) return 0;
+    let count = 0;
+    (state.incomes || []).forEach(inc => {
+      if (!['monthly', 'semimonthly'].includes(inc.freq)) return;
+      // Сканируем текущий и следующие 2 месяца
+      for (let mi = 0; mi <= 2; mi++) {
+        const mDate = new Date(today.getFullYear(), today.getMonth() + mi, 1);
+        (inc.payDays || []).forEach(d => {
+          const day = clampDayToMonth(d, mDate.getFullYear(), mDate.getMonth());
+          const pd = new Date(mDate.getFullYear(), mDate.getMonth(), day);
+          pd.setHours(0, 0, 0, 0);
+          if (pd >= today && pd <= limitDate) count++;
+        });
+      }
+    });
+    return count;
+  };
+
+  const totalUsed = ccards.reduce((s, c) => s + creditCardUsed(c), 0);
+  const totalLimit = ccards.reduce((s, c) => s + creditCardLimit(c), 0);
+  if (sumEl) sumEl.textContent = totalUsed > 0
+    ? `использовано ${fmt(totalUsed)} из ${fmt(totalLimit)}`
+    : `всё свободно · ${fmt(totalLimit)} лимита`;
+
+  let html = '';
+  ccards.forEach(b => {
+    const used = creditCardUsed(b);
+    const limit = creditCardLimit(b);
+    const available = b.amount || 0;
+    const usedPct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+    const tone = usedPct >= 80 ? 'var(--accent2)' : (usedPct >= 50 ? '#ff9f4f' : 'var(--accent)');
+    const daysLeft = daysUntilGrace(b);
+
+    // Расчёт авто-погашения по выплатам до грейса
+    let paybackLine = '';
+    if (used > 0 && b.gracePeriodEnd) {
+      const n = paychecksUntil(b.gracePeriodEnd);
+      if (n >= 1) {
+        const perPay = used / n;
+        paybackLine = `<div style="font-size:12px;color:var(--text);margin-top:8px;line-height:1.5">
+          💡 До грейса <strong>${n}</strong> ${n === 1 ? 'выплата' : (n < 5 ? 'выплаты' : 'выплат')} — откладывай <strong style="color:${tone}">${fmt(perPay)}</strong> с каждой, чтобы вернуть ${fmt(used)} вовремя.
+        </div>`;
+      } else if (daysLeft !== null && daysLeft >= 0) {
+        paybackLine = `<div style="font-size:12px;color:var(--accent2);margin-top:8px;line-height:1.5">⚠️ До грейса ${daysLeft} ${daysLeft === 1 ? 'день' : 'дн.'}, а зарплат в этот период по графику нет. Нужно вернуть ${fmt(used)} из текущих средств — иначе пойдут проценты.</div>`;
+      } else {
+        paybackLine = `<div style="font-size:12px;color:var(--accent2);margin-top:8px;line-height:1.5">⛔ Грейс закончился — на использованную часть уже капают проценты. Закрой как можно скорее.</div>`;
+      }
+    } else if (used > 0 && !b.gracePeriodEnd) {
+      paybackLine = `<div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5">Укажи дату конца грейс-периода (в «Балансы → ✎»), и трекер посчитает, сколько откладывать с каждой ЗП.</div>`;
+    }
+
+    const graceTone = daysLeft === null ? '' : (daysLeft < 0 ? 'var(--accent2)' : (daysLeft <= 7 ? 'var(--accent2)' : (daysLeft <= 30 ? '#ff9f4f' : 'var(--muted)')));
+    const graceLine = b.gracePeriodEnd
+      ? `<span style="color:${graceTone}">${daysLeft === null ? '' : (daysLeft < 0 ? `грейс −${Math.abs(daysLeft)} дн.` : `грейс через ${daysLeft} дн.`)}</span>`
+      : '';
+
+    html += `<div style="padding:12px 0;border-bottom:0.5px solid var(--border-soft)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:14px;font-weight:600">${esc(b.emoji || '💳')} ${esc(b.name)}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">доступно ${fmt(available)} ${graceLine ? '· ' + graceLine : ''}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700;color:${tone}">${fmt(used)}</div>
+          <div style="font-size:10px;color:var(--muted)">из ${fmt(limit)}</div>
+        </div>
+      </div>
+      <div class="progress-wrap"><div class="progress-bar" style="width:${usedPct}%;background:${tone}"></div></div>
+      ${paybackLine}
+    </div>`;
+  });
+  list.innerHTML = html;
+}
+
 // --- Расширенная разбивка метрик финансового здоровья (заменяет «Что если»-симулятор) ---
 function renderHealthMetrics() {
   const card = document.getElementById('dash-health-metrics-card');
@@ -8784,14 +9103,20 @@ function refreshQuickBalanceSelect() {
   }
   sel.innerHTML = '<option value="">— не привязывать, только учесть в бюджете —</option>' +
     balances.map(b => {
-      const label = `${esc(b.emoji || '💳')} ${esc(b.name)} · ${fmtCur(b.amount, b.currency)}`;
+      let label;
+      if (isCreditCard(b)) {
+        label = `💳 ${esc(b.name)} · доступно ${fmt(b.amount || 0)} из ${fmt(creditCardLimit(b))}`;
+      } else {
+        label = `${esc(b.emoji || '💳')} ${esc(b.name)} · ${fmtCur(b.amount, b.currency)}`;
+      }
       return `<option value="${esc(b.id)}">${label}</option>`;
     }).join('');
   // Автовыбор: если есть ровно один рублёвый — предвыбрать его
   if (prev && balances.some(b => b.id === prev)) {
     sel.value = prev;
   } else {
-    const rubBals = balances.filter(b => (b.currency || 'RUB') === 'RUB');
+    // Автовыбор: только из денежных рублёвых счетов (не из кредиток, чтобы случайно не зайти в долг)
+    const rubBals = balances.filter(b => (b.currency || 'RUB') === 'RUB' && !isCreditCard(b));
     if (rubBals.length === 1) sel.value = rubBals[0].id;
   }
 }
@@ -8876,6 +9201,7 @@ function renderV2() {
   try { renderInsights(); } catch (e) { console.error(e); }
   try { renderSubAudit(); } catch (e) { console.error(e); }
   try { renderHealthMetrics(); } catch (e) { console.error(e); }
+  try { renderCreditCards(); } catch (e) { console.error(e); }
 }
 
 // ===== INIT =====
