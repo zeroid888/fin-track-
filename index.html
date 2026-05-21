@@ -2649,6 +2649,16 @@ function load() {
         if (typeof g.monthly !== 'number') g.monthly = parseAmount(g.monthly) || 0;
         if (!g.deadline || typeof g.deadline !== 'string' || !/^\d{4}-\d{2}$/.test(g.deadline)) g.deadline = null;
         if (typeof g.paused !== 'boolean') g.paused = false;
+        // Статус «достигнута» — цель оплачена, в бюджете больше не резервируется.
+        // completed - флаг; completedAt - ISO дата; actualSpent - сколько реально ушло на покупку;
+        // shortfall - разница actualSpent − saved (если докидывали из других денег);
+        // shortfallSource - id баланса, откуда докинули (null если без привязки).
+        if (typeof g.completed !== 'boolean') g.completed = false;
+        if (g.completed) {
+          if (!g.completedAt || !/^\d{4}-\d{2}-\d{2}$/.test(g.completedAt)) g.completedAt = todayIso();
+          if (typeof g.actualSpent !== 'number') g.actualSpent = g.target || g.saved || 0;
+          if (typeof g.shortfall !== 'number') g.shortfall = Math.max(0, (g.actualSpent || 0) - (g.saved || 0));
+        }
       });
       state.habits.forEach(h => {
         if (!h.id) h.id = safeId();
@@ -2791,7 +2801,9 @@ function mandatoryCreditsMonthly() {
 }
 // Цели на паузе (g.paused) не резервируют месячный взнос — не влияют на дневной бюджет и план.
 function totalGoalsMonthly() {
-  return state.goals.reduce((s, g) => s + (g.paused ? 0 : (g.monthly || 0)), 0);
+  // Выполненные (g.completed) и паузные (g.paused) не резервируют месячный взнос —
+  // не давят на дневной бюджет и не тянут «свободно на жизнь» в минус.
+  return state.goals.reduce((s, g) => s + ((g.paused || g.completed) ? 0 : (g.monthly || 0)), 0);
 }
 function toggleGoalPause(id) {
   const g = state.goals.find(x => x.id === id);
@@ -2800,6 +2812,117 @@ function toggleGoalPause(id) {
   save();
   renderAll();
   toast(g.paused ? `⏸ «${g.name}» на паузе — не резервируем взнос` : `▶️ «${g.name}» снова в работе`);
+}
+
+// Закрытие цели как «выполненной» (оплачена в реальной жизни).
+// Поток:
+//   1) Спрашиваем фактически потраченную сумму (default = target, либо saved если он больше).
+//   2) Если actualSpent > saved (накоплено), значит докинули — спрашиваем с какого счёта;
+//      можно пропустить (без транзакции и без списания с баланса).
+//   3) Если выбран счёт — списываем «доплату» с баланса и заводим расход-транзакцию,
+//      чтобы покупка появилась в истории и среднем чеке.
+// После закрытия цель остаётся в state.goals, но не давит на бюджет: g.monthly игнорируется
+// в totalGoalsMonthly (см. выше). UI показывает её в секции «✓ Достигнутые».
+function completeGoal(id) {
+  const g = state.goals.find(x => x.id === id);
+  if (!g) return;
+  if (g.completed) {
+    if (confirm(`«${g.name}» уже отмечена как достигнутая. Вернуть в активные?`)) uncompleteGoal(id);
+    return;
+  }
+
+  const targetVal = g.target || g.saved || 0;
+  const rawAmt = prompt(
+    `Закрываем цель «${g.name}» как выполненную.\n\nНа какую сумму ты реально закрыл покупку? (₽)`,
+    String(Math.round(targetVal))
+  );
+  if (rawAmt === null) return;
+  const actualSpent = parseAmount(rawAmt);
+  if (!isFinite(actualSpent) || actualSpent < 0) { alert('Сумма должна быть числом ≥ 0'); return; }
+
+  const saved = g.saved || 0;
+  const shortfall = Math.max(0, actualSpent - saved);
+  let shortfallSource = null;
+
+  if (shortfall > 0) {
+    const cashList = (state.balances || []).filter(b => !isCreditCard || !isCreditCard(b) ? true : true);
+    // Только реальные счета и кредитки — даём выбрать или пропустить
+    const balances = state.balances || [];
+    if (balances.length > 0) {
+      const labels = balances.map((b, idx) => {
+        if (typeof isCreditCard === 'function' && isCreditCard(b)) {
+          return `${idx + 1}. 💳 ${b.name} · доступно ${fmt(b.amount || 0)} из ${fmt(b.limit || 0)} (кредитка)`;
+        }
+        return `${idx + 1}. ${b.emoji || '💳'} ${b.name} · ${fmtCur(b.amount, b.currency)}`;
+      }).join('\n');
+      const choice = prompt(
+        `Не хватало ${fmt(shortfall)} ₽ — откуда доплатил?\n\n${labels}\n0. — не привязывать (просто отметить цель закрытой)\n\nВведи номер:`,
+        ''
+      );
+      if (choice !== null) {
+        const idx = parseInt(choice, 10);
+        if (Number.isInteger(idx) && idx >= 1 && idx <= balances.length) {
+          shortfallSource = balances[idx - 1].id;
+        }
+      }
+    }
+  }
+
+  // Списываем с выбранного баланса + создаём транзакцию-расход
+  if (shortfallSource && shortfall > 0) {
+    const bal = (state.balances || []).find(b => b.id === shortfallSource);
+    if (bal) {
+      const deduct = (bal.currency && bal.currency !== 'RUB')
+        ? fromRub(shortfall, bal.currency)
+        : shortfall;
+      if (bal.amount < deduct) {
+        if (!confirm(`На «${bal.name}» ${fmtCur(bal.amount, bal.currency)}, а доплата ${fmtCur(deduct, bal.currency)}. Списать всё равно?`)) {
+          return;
+        }
+      }
+      bal.amount = Math.round((bal.amount - deduct) * 100) / 100;
+      state.transactions.push({
+        id: safeId(),
+        date: todayIso(),
+        name: `🎯 ${g.name} (доплата)`,
+        amount: shortfall,
+        cat: '🎯 Цель',
+        type: 'expense',
+        bad: false,
+        balanceId: bal.id,
+        balanceDeducted: deduct,
+        balanceCurrency: bal.currency
+      });
+    }
+  }
+
+  g.completed = true;
+  g.completedAt = todayIso();
+  g.actualSpent = actualSpent;
+  g.shortfall = shortfall;
+  g.shortfallSource = shortfallSource;
+
+  save();
+  renderAll();
+  const note = shortfall > 0
+    ? (shortfallSource ? ` · доплата ${fmt(shortfall)} ₽ списана с баланса` : ` · доплата ${fmt(shortfall)} ₽ учтена без баланса`)
+    : '';
+  toast(`✓ «${g.name}» закрыта${note}`, 'good');
+}
+
+function uncompleteGoal(id) {
+  const g = state.goals.find(x => x.id === id);
+  if (!g) return;
+  // Реверс списания: если при закрытии была доплата с баланса, возвращать её НЕ будем
+  // (транзакцию пользователь может удалить вручную, если это была ошибка).
+  g.completed = false;
+  g.completedAt = null;
+  g.actualSpent = null;
+  g.shortfall = null;
+  g.shortfallSource = null;
+  save();
+  renderAll();
+  toast(`↩︎ «${g.name}» снова в активных`);
 }
 // AUDIT P0-6 | Излишек earmark-дохода намеренно НЕ идёт в дневной бюджет текущего месяца
 // (Daniel: «излишек остаётся на следующий месяц бонусом, чтобы меньше надо было копить»).
@@ -6996,83 +7119,160 @@ function renderGoals() {
     list.innerHTML = '<div class="empty-state"><div class="empty-icon">🎯</div>Нет целей — добавь первую</div>';
     return;
   }
+
+  // Разделяем активные (включая paused) и достигнутые
+  const active = state.goals.filter(g => !g.completed);
+  const done = state.goals.filter(g => g.completed)
+    .sort((a, b) => (b.completedAt || '').localeCompare(a.completedAt || ''));
+
   let html = '';
-  state.goals.forEach(g => {
-    const remaining = Math.max(0, (g.target || 0) - (g.saved || 0));
-    const pct = Math.min(100, Math.round(((g.saved || 0) / (g.target || 1)) * 100));
-    const monthsByMonthly = g.monthly > 0 ? Math.ceil(remaining / g.monthly) : null;
-    const monthsByDeadline = monthsUntilDeadline(g.deadline);
-    const requiredMonthly = goalRequiredMonthly(g); // по сроку
 
-    // Подсказка под названием: либо по сроку, либо по ежемесячной сумме
-    let subLine = '';
-    if (g.deadline) {
-      const deadlineLabel = formatMonthLabel(g.deadline);
-      if (monthsByDeadline === 0) {
-        subLine = `⏰ Срок: ${deadlineLabel} (текущий месяц) · ещё надо ${fmt(remaining)}`;
-      } else if (monthsByDeadline !== null) {
-        subLine = `📅 Срок: ${deadlineLabel} · осталось ${monthsByDeadline} мес`;
+  if (active.length > 0) {
+    active.forEach(g => {
+      const remaining = Math.max(0, (g.target || 0) - (g.saved || 0));
+      const pct = Math.min(100, Math.round(((g.saved || 0) / (g.target || 1)) * 100));
+      const monthsByMonthly = g.monthly > 0 ? Math.ceil(remaining / g.monthly) : null;
+      const monthsByDeadline = monthsUntilDeadline(g.deadline);
+      const requiredMonthly = goalRequiredMonthly(g); // по сроку
+
+      // Подсказка под названием: либо по сроку, либо по ежемесячной сумме
+      let subLine = '';
+      if (g.deadline) {
+        const deadlineLabel = formatMonthLabel(g.deadline);
+        if (monthsByDeadline === 0) {
+          subLine = `⏰ Срок: ${deadlineLabel} (текущий месяц) · ещё надо ${fmt(remaining)}`;
+        } else if (monthsByDeadline !== null) {
+          subLine = `📅 Срок: ${deadlineLabel} · осталось ${monthsByDeadline} мес`;
+        }
+      } else if (monthsByMonthly !== null) {
+        subLine = `~${monthsByMonthly} месяцев до цели`;
       }
-    } else if (monthsByMonthly !== null) {
-      subLine = `~${monthsByMonthly} месяцев до цели`;
-    }
 
-    // Если есть срок, рядом с «в месяц» покажем, сколько реально надо откладывать
-    let monthlyNote = '';
-    if (requiredMonthly !== null) {
-      if (g.monthly > 0 && Math.abs(g.monthly - requiredMonthly) > 1) {
-        const diff = requiredMonthly - g.monthly;
-        monthlyNote = diff > 0
-          ? `<div style="font-size:11px;color:var(--accent2);margin-top:4px">По сроку надо ${fmt(Math.ceil(requiredMonthly))} · не хватает +${fmt(Math.ceil(diff))}/мес</div>`
-          : `<div style="font-size:11px;color:var(--accent);margin-top:4px">По сроку достаточно ${fmt(Math.ceil(requiredMonthly))}/мес — ты опережаешь</div>`;
-      } else if (g.monthly === 0) {
-        monthlyNote = `<div style="font-size:11px;color:var(--accent3);margin-top:4px">Чтобы успеть к сроку — откладывай ${fmt(Math.ceil(requiredMonthly))}/мес</div>`;
+      // Если есть срок, рядом с «в месяц» покажем, сколько реально надо откладывать
+      let monthlyNote = '';
+      if (requiredMonthly !== null) {
+        if (g.monthly > 0 && Math.abs(g.monthly - requiredMonthly) > 1) {
+          const diff = requiredMonthly - g.monthly;
+          monthlyNote = diff > 0
+            ? `<div style="font-size:11px;color:var(--accent2);margin-top:4px">По сроку надо ${fmt(Math.ceil(requiredMonthly))} · не хватает +${fmt(Math.ceil(diff))}/мес</div>`
+            : `<div style="font-size:11px;color:var(--accent);margin-top:4px">По сроку достаточно ${fmt(Math.ceil(requiredMonthly))}/мес — ты опережаешь</div>`;
+        } else if (g.monthly === 0) {
+          monthlyNote = `<div style="font-size:11px;color:var(--accent3);margin-top:4px">Чтобы успеть к сроку — откладывай ${fmt(Math.ceil(requiredMonthly))}/мес</div>`;
+        }
       }
-    }
 
-    const pausedBadge = g.paused
-      ? '<span style="display:inline-block;margin-left:6px;padding:2px 8px;border-radius:10px;background:#332a15;color:#ff9f4f;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">⏸ пауза</span>'
-      : '';
-    const pauseBtn = g.paused
-      ? `<button class="delete-btn" onclick="toggleGoalPause('${g.id}')" title="Возобновить цель" style="color:var(--accent)">▶</button>`
-      : `<button class="delete-btn" onclick="toggleGoalPause('${g.id}')" title="Поставить цель на паузу">⏸</button>`;
-    html += `<div class="goal-card" style="${g.paused ? 'opacity:0.65' : ''}">
-      <div class="goal-header">
-        <div>
-          <div class="goal-name">${esc(g.name)}${pausedBadge}</div>
-          ${subLine ? `<div style="font-size:12px;color:var(--muted);margin-top:4px">${subLine}</div>` : ''}
+      const pausedBadge = g.paused
+        ? '<span style="display:inline-block;margin-left:6px;padding:2px 8px;border-radius:10px;background:#332a15;color:#ff9f4f;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">⏸ пауза</span>'
+        : '';
+      const pauseBtn = g.paused
+        ? `<button class="delete-btn" onclick="toggleGoalPause('${g.id}')" title="Возобновить цель" style="color:var(--accent)">▶</button>`
+        : `<button class="delete-btn" onclick="toggleGoalPause('${g.id}')" title="Поставить цель на паузу">⏸</button>`;
+      const doneBtn = `<button class="delete-btn" onclick="completeGoal('${g.id}')" title="Цель достигнута / оплачена" style="color:var(--accent)">✓</button>`;
+
+      html += `<div class="goal-card" style="${g.paused ? 'opacity:0.65' : ''}">
+        <div class="goal-header">
+          <div>
+            <div class="goal-name">${esc(g.name)}${pausedBadge}</div>
+            ${subLine ? `<div style="font-size:12px;color:var(--muted);margin-top:4px">${subLine}</div>` : ''}
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:28px">${esc(g.emoji)}</span>
+            ${doneBtn}
+            ${pauseBtn}
+            <button class="delete-btn" onclick="editGoalSaved('${esc(g.id)}')" title="Изменить накоплено">✎</button>
+            <button class="delete-btn" onclick="deleteGoal('${esc(g.id)}')">✕</button>
+          </div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:28px">${esc(g.emoji)}</span>
-          ${pauseBtn}
-          <button class="delete-btn" onclick="editGoalSaved('${esc(g.id)}')" title="Изменить накоплено">✎</button>
-          <button class="delete-btn" onclick="deleteGoal('${esc(g.id)}')">✕</button>
+        <div class="goal-nums">
+          <div class="goal-num-item">
+            <div class="goal-num-val" style="color:var(--accent)">${fmt(g.saved || 0)}</div>
+            <div class="goal-num-lab">накоплено</div>
+          </div>
+          <div class="goal-num-item">
+            <div class="goal-num-val" style="color:var(--muted)">${fmt(g.target)}</div>
+            <div class="goal-num-lab">цель</div>
+          </div>
+          ${g.monthly > 0 || requiredMonthly !== null ? `<div class="goal-num-item">
+            <div class="goal-num-val" style="color:var(--accent3)">${fmt(g.monthly > 0 ? g.monthly : Math.ceil(requiredMonthly || 0))}</div>
+            <div class="goal-num-lab">в месяц</div>
+          </div>` : ''}
         </div>
-      </div>
-      <div class="goal-nums">
-        <div class="goal-num-item">
-          <div class="goal-num-val" style="color:var(--accent)">${fmt(g.saved || 0)}</div>
-          <div class="goal-num-lab">накоплено</div>
+        ${monthlyNote}
+        <div style="margin-top:12px;margin-bottom:4px;display:flex;justify-content:space-between">
+          <span style="font-size:12px;color:var(--muted)">Прогресс</span>
+          <span style="font-size:12px;font-weight:600;color:var(--accent)">${pct}%</span>
         </div>
-        <div class="goal-num-item">
-          <div class="goal-num-val" style="color:var(--muted)">${fmt(g.target)}</div>
-          <div class="goal-num-lab">цель</div>
+        <div class="progress-wrap" style="height:8px">
+          <div class="progress-bar green" style="width:${pct}%"></div>
         </div>
-        ${g.monthly > 0 || requiredMonthly !== null ? `<div class="goal-num-item">
-          <div class="goal-num-val" style="color:var(--accent3)">${fmt(g.monthly > 0 ? g.monthly : Math.ceil(requiredMonthly || 0))}</div>
-          <div class="goal-num-lab">в месяц</div>
-        </div>` : ''}
-      </div>
-      ${monthlyNote}
-      <div style="margin-top:12px;margin-bottom:4px;display:flex;justify-content:space-between">
-        <span style="font-size:12px;color:var(--muted)">Прогресс</span>
-        <span style="font-size:12px;font-weight:600;color:var(--accent)">${pct}%</span>
-      </div>
-      <div class="progress-wrap" style="height:8px">
-        <div class="progress-bar green" style="width:${pct}%"></div>
-      </div>
-    </div>`;
-  });
+      </div>`;
+    });
+  } else {
+    html += '<div class="empty-state" style="padding:20px 0"><div class="empty-icon">🎯</div>Активных целей нет</div>';
+  }
+
+  // Секция «Достигнутые» — свёрнута по умолчанию, чтобы не шуметь
+  if (done.length > 0) {
+    html += `<details class="goal-done-section" style="margin-top:8px">
+      <summary style="cursor:pointer;padding:12px 14px;border:0.5px solid var(--border-soft);border-radius:12px;background:var(--surface2);font-size:13px;font-weight:600;display:flex;align-items:center;gap:10px;list-style:none">
+        <span style="color:var(--accent)">✓</span>
+        <span style="flex:1">Достигнутые цели</span>
+        <span style="color:var(--muted);font-weight:400;font-size:12px">${done.length}</span>
+      </summary>
+      <div style="margin-top:10px">`;
+    done.forEach(g => {
+      const savedBefore = g.saved || 0;
+      const spent = g.actualSpent || 0;
+      const shortfall = g.shortfall || 0;
+      const balName = g.shortfallSource
+        ? (() => {
+            const b = (state.balances || []).find(x => x.id === g.shortfallSource);
+            return b ? `${b.emoji || '💳'} ${b.name}` : '—';
+          })()
+        : null;
+      const sourceLine = shortfall > 0
+        ? (balName
+            ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">из ${fmt(savedBefore)} накопления + доплата ${fmt(shortfall)} ₽ с «${esc(balName)}»</div>`
+            : `<div style="font-size:11px;color:var(--muted);margin-top:4px">из ${fmt(savedBefore)} накопления + доплата ${fmt(shortfall)} ₽ (без привязки к счёту)</div>`)
+        : `<div style="font-size:11px;color:var(--muted);margin-top:4px">полностью покрыто накоплением</div>`;
+      const dateLine = g.completedAt
+        ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">📅 Закрыта ${g.completedAt}</div>`
+        : '';
+      html += `<div class="goal-card" style="opacity:0.85;border-left:3px solid var(--accent)">
+        <div class="goal-header">
+          <div style="min-width:0;flex:1">
+            <div class="goal-name">
+              <span style="text-decoration:line-through;color:var(--muted)">${esc(g.name)}</span>
+              <span style="display:inline-block;margin-left:6px;padding:2px 8px;border-radius:10px;background:rgba(90,111,61,0.15);color:var(--accent);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px">✓ закрыта</span>
+            </div>
+            ${dateLine}
+            ${sourceLine}
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:24px;opacity:0.6">${esc(g.emoji)}</span>
+            <button class="delete-btn" onclick="uncompleteGoal('${g.id}')" title="Вернуть в активные" style="color:var(--accent)">↩︎</button>
+            <button class="delete-btn" onclick="deleteGoal('${esc(g.id)}')">✕</button>
+          </div>
+        </div>
+        <div class="goal-nums" style="opacity:0.8">
+          <div class="goal-num-item">
+            <div class="goal-num-val" style="color:var(--muted)">${fmt(spent)}</div>
+            <div class="goal-num-lab">потрачено</div>
+          </div>
+          <div class="goal-num-item">
+            <div class="goal-num-val" style="color:var(--muted)">${fmt(g.target || 0)}</div>
+            <div class="goal-num-lab">цель</div>
+          </div>
+          ${shortfall > 0 ? `<div class="goal-num-item">
+            <div class="goal-num-val" style="color:var(--accent2)">+${fmt(shortfall)}</div>
+            <div class="goal-num-lab">доплата</div>
+          </div>` : ''}
+        </div>
+      </div>`;
+    });
+    html += `</div></details>`;
+  }
+
   list.innerHTML = html;
 }
 
