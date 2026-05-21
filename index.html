@@ -129,7 +129,7 @@ body, body *, button, input, select, textarea, h1, h2, h3, h4, h5, h6 {
 
 /* Числа в табличной форме */
 .big-num, .daily-amount, .health-ring .val, .streak-val, .goal-num-val,
-.month-label, .sub-amt, .whatif-total-val, .whatif-save, .item-amount,
+.month-label, .sub-amt, .item-amount, .hmetric-pts,
 .forecast-val {
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.025em !important;
@@ -345,6 +345,43 @@ body {
   border-radius: 999px;
   background: var(--text);
   transition: width 0.5s ease;
+}
+.daily-formula {
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: var(--surface2);
+  border: 0.5px solid var(--border-soft);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.daily-formula:empty { display: none; }
+.daily-formula strong { color: var(--text); font-weight: 600; }
+.daily-formula .df-title {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 6px;
+  display: block;
+}
+.daily-formula .df-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+}
+.daily-formula .df-row.total {
+  border-top: 0.5px dashed var(--border-soft);
+  margin-top: 4px;
+  padding-top: 6px;
+}
+.daily-formula.danger {
+  background: rgba(184, 90, 60, 0.06);
+  border-color: rgba(184, 90, 60, 0.3);
 }
 
 /* ───── PROGRESS BARS ───── */
@@ -749,41 +786,104 @@ select option { background: var(--surface); color: var(--text); }
 .sub-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .sub-amt { font-weight: 600 !important; font-size: 14px; color: var(--accent2); }
 
-/* ───── WHAT-IF SIMULATOR ───── */
-.whatif-row { margin-bottom: 12px; }
-.whatif-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; font-size: 13px; }
-.whatif-cat { font-weight: 600; }
-.whatif-save { color: var(--good); font-weight: 600 !important; font-size: 13px; }
-input[type=range].whatif {
-  -webkit-appearance: none; appearance: none;
-  width: 100%; height: 4px; background: var(--bg); border-radius: 999px; outline: none;
-  border: 0.5px solid var(--border); padding: 0;
+.subaudit-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+  margin-bottom: 8px;
 }
-input[type=range].whatif::-webkit-slider-thumb {
-  -webkit-appearance: none; appearance: none;
-  width: 18px; height: 18px; border-radius: 50%;
-  background: var(--text); border: 3px solid var(--surface); cursor: pointer;
-  box-shadow: 0 0 0 0.5px var(--border);
+
+.sub-calendar {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
 }
-input[type=range].whatif::-moz-range-thumb {
-  width: 18px; height: 18px; border-radius: 50%;
-  background: var(--text); border: 3px solid var(--surface); cursor: pointer;
-}
-.whatif-total {
-  background: var(--surface2);
-  border: 0.5px solid var(--border);
+.sub-cal-cell {
+  aspect-ratio: 1;
   border-radius: 8px;
-  padding: 14px;
-  margin-top: 14px;
+  background: var(--surface2);
+  border: 0.5px solid var(--border-soft);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  font-variant-numeric: tabular-nums;
+  position: relative;
+}
+.sub-cal-cell.warm {
+  background: rgba(255, 159, 79, 0.10);
+  border-color: rgba(255, 159, 79, 0.35);
+}
+.sub-cal-cell.hot {
+  background: rgba(184, 90, 60, 0.12);
+  border-color: rgba(184, 90, 60, 0.45);
+}
+.sub-cal-day {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+.sub-cal-sum {
+  font-size: 9.5px;
+  color: var(--accent2);
+  font-weight: 600;
+  margin-top: auto;
   text-align: center;
+  line-height: 1.1;
 }
-.whatif-total-val {
-  font-size: 22px !important;
-  font-weight: 600 !important;
-  color: var(--good);
-  letter-spacing: -0.03em !important;
+
+/* ───── HEALTH METRICS (заменили What-If) ───── */
+.hmetric {
+  background: var(--surface2);
+  border: 0.5px solid var(--border-soft);
+  border-left: 3px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
 }
-.whatif-total-lab { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.hmetric:last-child { margin-bottom: 0; }
+.hmetric-good { border-left-color: var(--good); }
+.hmetric-warn { border-left-color: #ff9f4f; }
+.hmetric-bad  { border-left-color: var(--accent2); }
+.hmetric-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.hmetric-light {
+  width: 10px; height: 10px; border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 0.5px rgba(255,255,255,0.05);
+}
+.hmetric-light-good { background: var(--good); }
+.hmetric-light-warn { background: #ff9f4f; }
+.hmetric-light-bad  { background: var(--accent2); }
+.hmetric-name { flex: 1; font-size: 14px; font-weight: 600; color: var(--text); }
+.hmetric-pts {
+  font-family: 'Unbounded', sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.hmetric-pts-of {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+  margin-left: 1px;
+}
+.hmetric-val {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.hmetric-tone-good { color: var(--good); font-weight: 600; }
+.hmetric-tone-warn { color: #ff9f4f; font-weight: 600; }
+.hmetric-tone-bad  { color: var(--accent2); font-weight: 600; }
+.hmetric-tip {
+  font-size: 11.5px;
+  color: var(--text);
+  line-height: 1.5;
+  opacity: 0.85;
+}
 
 /* ───── FAB ───── */
 .fab {
@@ -893,6 +993,26 @@ button:focus, a:focus { outline: none; }
   transition: all .15s;
 }
 .preset-chip:hover { border-color: var(--text); background: var(--surface2); }
+
+.quick-date-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.date-chip {
+  background: var(--surface);
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text);
+  transition: all .15s;
+  font-family: inherit;
+}
+.date-chip:hover { border-color: var(--text); background: var(--surface2); }
+.date-chip.active {
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+  font-weight: 600;
+}
 
 /* ───── FORECAST BAND ───── */
 .forecast {
@@ -1198,9 +1318,19 @@ button:focus, a:focus { outline: none; }
   margin-bottom: 4px;
 }
 .mf-seg { height: 100%; transition: width 0.6s ease; }
-.mf-exp  { background: var(--accent2); }
-.mf-cr   { background: #7a6850; }
-.mf-free { background: var(--good); }
+.mf-exp    { background: var(--accent2); }
+.mf-cr     { background: #7a6850; }
+.mf-goals  { background: var(--accent3, #4a7eb8); }
+.mf-habits { background: #ff9f4f; }
+.mf-free   { background: var(--good); }
+.mf-hero-explain {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 6px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+.mf-hero-explain:empty { display: none; }
 
 .mf-rows {
   display: flex;
@@ -1227,9 +1357,11 @@ button:focus, a:focus { outline: none; }
   text-overflow: ellipsis;
 }
 .mf-dot { width: 9px; height: 9px; border-radius: 999px; flex-shrink: 0; }
-.mf-dot-in  { background: var(--text); }
-.mf-dot-exp { background: var(--accent2); }
-.mf-dot-cr  { background: #7a6850; }
+.mf-dot-in     { background: var(--text); }
+.mf-dot-exp    { background: var(--accent2); }
+.mf-dot-cr     { background: #7a6850; }
+.mf-dot-goals  { background: var(--accent3, #4a7eb8); }
+.mf-dot-habits { background: #ff9f4f; }
 .mf-amt {
   font-variant-numeric: tabular-nums;
   font-size: 14px;
@@ -1240,6 +1372,86 @@ button:focus, a:focus { outline: none; }
   flex-shrink: 0;
 }
 .mf-row.in .mf-amt  { color: var(--good); }
+
+/* ───── PLAN CARDS (раскрывашки в Плане по ближайшей выплате) ───── */
+.plan-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+@media (max-width: 480px) {
+  .plan-cards { grid-template-columns: 1fr; }
+}
+.plan-card {
+  border: 0.5px solid var(--border-soft);
+  border-radius: 12px;
+  background: var(--surface2);
+  overflow: hidden;
+}
+.plan-card-summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.plan-card-summary::-webkit-details-marker { display: none; }
+.plan-card-chev {
+  font-size: 12px;
+  color: var(--muted);
+  transition: transform 0.2s ease;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.plan-card[open] .plan-card-chev { transform: rotate(90deg); }
+.plan-card-text { min-width: 0; flex: 1; }
+.plan-card-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.plan-card-amt {
+  font-family: 'Unbounded', sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.plan-card-body {
+  padding: 4px 14px 12px 36px;
+  border-top: 0.5px dashed var(--border-soft);
+}
+.plan-detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 12.5px;
+  border-bottom: 0.5px solid var(--border-soft);
+}
+.plan-detail-row:last-child { border-bottom: none; }
+.plan-detail-name {
+  color: var(--text);
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-detail-amt {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.plan-detail-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 0;
+  font-style: italic;
+}
 
 /* ───── STAT CARDS (Разовые / Следующая выплата) ───── */
 .stat-grid .stat-card { padding: 16px; margin-bottom: 0; }
@@ -1355,6 +1567,9 @@ button:focus, a:focus { outline: none; }
       <span id="dash-daily-max" style="font-size:11px;color:var(--muted)"></span>
     </div>
 
+    <!-- Формула расчёта дневного бюджета — простая разбивка, чтобы цифра не выглядела магической -->
+    <div class="daily-formula" id="dash-daily-formula"></div>
+
     <!-- V2: pacing -->
     <div class="pacing-row" id="dash-pacing-row" style="display:none">
       <span id="dash-pacing-lab">—</span>
@@ -1388,6 +1603,19 @@ button:focus, a:focus { outline: none; }
     <div>
       <div class="health-label">Финансовое здоровье <span class="health-grade" id="health-grade" style="background:var(--surface2);color:var(--muted)">—</span></div>
       <div class="health-sub" id="health-sub">Добавь доходы, расходы и кошельки — и мы посчитаем индекс.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Средний чек жизни</div>
+    <div style="display:flex;align-items:center;gap:20px">
+      <div>
+        <div class="big-num" id="dash-avg" style="font-size:28px">0 ₽</div>
+        <div class="num-label">в день на всё</div>
+      </div>
+      <div style="flex:1">
+        <div style="font-size:12px;color:var(--muted);line-height:1.6" id="dash-avg-text">Добавь данные для анализа</div>
+      </div>
     </div>
   </div>
 
@@ -1430,15 +1658,18 @@ button:focus, a:focus { outline: none; }
     </div>
     <div class="mf-hero">
       <div class="mf-hero-left">
-        <div class="mf-hero-label">свободно после обязательных</div>
+        <div class="mf-hero-label">остаётся на жизнь</div>
         <div class="big-num" id="dash-free">0 ₽</div>
+        <div class="mf-hero-explain" id="dash-free-explain"></div>
       </div>
       <div class="mf-hero-right" id="dash-free-pill"></div>
     </div>
     <div class="mf-stack" id="mf-stack" aria-hidden="true">
-      <div class="mf-seg mf-exp"  style="width:0%"></div>
-      <div class="mf-seg mf-cr"   style="width:0%"></div>
-      <div class="mf-seg mf-free" style="width:0%"></div>
+      <div class="mf-seg mf-exp"    style="width:0%"></div>
+      <div class="mf-seg mf-cr"     style="width:0%"></div>
+      <div class="mf-seg mf-goals"  style="width:0%"></div>
+      <div class="mf-seg mf-habits" style="width:0%"></div>
+      <div class="mf-seg mf-free"   style="width:0%"></div>
     </div>
     <div class="mf-rows">
       <div class="mf-row in">
@@ -1455,6 +1686,16 @@ button:focus, a:focus { outline: none; }
         <span class="mf-dot mf-dot-cr"></span>
         <span class="mf-row-label">Кредиты</span>
         <span class="mf-amt" id="dash-credits">0 ₽</span>
+      </div>
+      <div class="mf-row out" id="dash-goals-row" style="display:none">
+        <span class="mf-dot mf-dot-goals"></span>
+        <span class="mf-row-label">Цели (накопления)</span>
+        <span class="mf-amt" id="dash-goals-month">0 ₽</span>
+      </div>
+      <div class="mf-row out" id="dash-habits-row" style="display:none">
+        <span class="mf-dot mf-dot-habits"></span>
+        <span class="mf-row-label">Привычки</span>
+        <span class="mf-amt" id="dash-habits-month">0 ₽</span>
       </div>
     </div>
   </div>
@@ -1544,33 +1785,16 @@ button:focus, a:focus { outline: none; }
     <div id="dash-subaudit-list"></div>
   </div>
 
-  <!-- V2: What-if simulator -->
-  <div class="card" id="dash-whatif-card" style="display:none">
-    <div class="card-title">🎛 «Что если» — симулятор</div>
+  <!-- Health-metrics breakdown (детальная разбивка финансового здоровья) -->
+  <div class="card" id="dash-health-metrics-card" style="display:none">
+    <div class="card-title">📊 Что подсветило индекс здоровья</div>
     <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:14px">
-      Двигай ползунки — посмотри, сколько освободится в месяц и в год, если урезать категории.
+      Каждая метрика даёт до 25 баллов. Светофор показывает: <span style="color:var(--accent)">зелёный</span> — норма, <span style="color:#ff9f4f">жёлтый</span> — стоит подтянуть, <span style="color:var(--accent2)">красный</span> — слабое место.
     </div>
-    <div id="dash-whatif-sliders"></div>
-    <div class="whatif-total">
-      <div class="whatif-total-val" id="dash-whatif-save">0 ₽</div>
-      <div class="whatif-total-lab">сэкономишь в месяц · <span id="dash-whatif-year">0 ₽</span> за год</div>
-    </div>
+    <div id="dash-health-metrics-list"></div>
   </div>
 
   <div id="dash-alerts"></div>
-
-  <div class="card">
-    <div class="card-title">Средний чек жизни</div>
-    <div style="display:flex;align-items:center;gap:20px">
-      <div>
-        <div class="big-num" id="dash-avg" style="font-size:28px">0 ₽</div>
-        <div class="num-label">в день на всё</div>
-      </div>
-      <div style="flex:1">
-        <div style="font-size:12px;color:var(--muted);line-height:1.6" id="dash-avg-text">Добавь данные для анализа</div>
-      </div>
-    </div>
-  </div>
 
 </div>
 
@@ -1915,6 +2139,15 @@ button:focus, a:focus { outline: none; }
         Остаток долга уменьшается автоматически при подтверждении.
       </div>
     </div>
+    <div class="form-group">
+      <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+        <input type="checkbox" id="cr-split" style="width:18px;height:18px;margin-top:2px;accent-color:var(--accent);flex-shrink:0">
+        <span style="flex:1">Откладывать с двух выплат подряд</span>
+      </label>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5;padding-left:26px">
+        Если платёж попадает в окно после второй выплаты месяца (например, кредит 29-го при ЗП 5 и 20) — половина суммы будет «откладываться» с прошлой выплаты (с 5-го), вторая половина — с ближайшей (20-го). Так на каждой ЗП есть план, а не «0 ₽ на отложить» в одну и «всё сразу» в другую.
+      </div>
+    </div>
     <button class="btn btn-primary" onclick="addCredit()">+ Добавить</button>
   </div>
 
@@ -2194,6 +2427,16 @@ button:focus, a:focus { outline: none; }
   <div class="form-group">
     <label>Сумма (₽)</label>
     <input id="quick-amt" type="number" inputmode="decimal" placeholder="0" style="font-size:18px;font-weight:600">
+  </div>
+  <div class="form-group">
+    <label>Дата траты</label>
+    <div class="quick-date-chips" id="quick-date-chips" role="group" aria-label="Дата">
+      <button type="button" class="date-chip active" data-offset="0" onclick="setQuickDateOffset(0, event)">Сегодня</button>
+      <button type="button" class="date-chip" data-offset="-1" onclick="setQuickDateOffset(-1, event)">Вчера</button>
+      <button type="button" class="date-chip" data-offset="-2" onclick="setQuickDateOffset(-2, event)">Позавчера</button>
+    </div>
+    <input id="quick-date" type="date" onchange="onQuickDateInput()" style="margin-top:8px;font-family:inherit">
+    <div style="font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5">Для пропущенных дней выбери дату вручную — трата уйдёт в историю на тот день.</div>
   </div>
   <div class="form-group">
     <label>Списать со счёта</label>
@@ -4183,6 +4426,8 @@ function addCredit() {
       : term;
 
     const initialTotal = isNaN(total) ? 0 : total;
+    const splitEl = document.getElementById('cr-split');
+    const splitAcrossPaychecks = !!(splitEl && splitEl.checked);
     state.credits.push({
       id: safeId(),
       name,
@@ -4200,6 +4445,7 @@ function addCredit() {
       balanceId: balanceId || null, // с какого счёта списывается
       kind,                         // 'mandatory' | 'revolving'
       paused: false,
+      splitAcrossPaychecks,         // делить платёж между двумя ближайшими выплатами (см. computePaycheckAllocations)
       deductionLog: [],             // ключи уже подтверждённых списаний (YYYY-MM или YYYY-MM-DD)
       skippedMonths: []
     });
@@ -4219,6 +4465,7 @@ function addCredit() {
     if (freqEl) freqEl.value = 'monthly';
     if (termUnitEl) termUnitEl.value = 'months';
     if (kindEl) kindEl.value = 'mandatory';
+    if (splitEl) splitEl.checked = false;
     updateCreditScheduleFields();
     renderAll();
     console.log('[addCredit] добавлено. всего кредитов:', state.credits.length);
@@ -5089,21 +5336,47 @@ function renderDashboard() {
   document.getElementById('dash-credits').textContent = fmt(cr);
   document.getElementById('dash-txn-expenses').textContent = fmt(txExp);
   document.getElementById('dash-txn-count').textContent = `${txCount} операций · поступлений ${fmt(txIncome)}`;
-  
+
+  const habitsMonthly = totalHabitsMonthly();
+  const goalsRow = document.getElementById('dash-goals-row');
+  const habitsRow = document.getElementById('dash-habits-row');
+  const goalsAmtEl = document.getElementById('dash-goals-month');
+  const habitsAmtEl = document.getElementById('dash-habits-month');
+  if (goalsAmtEl) goalsAmtEl.textContent = fmt(goalsMonthly);
+  if (habitsAmtEl) habitsAmtEl.textContent = fmt(habitsMonthly);
+  if (goalsRow) goalsRow.style.display = goalsMonthly > 0 ? '' : 'none';
+  if (habitsRow) habitsRow.style.display = habitsMonthly > 0 ? '' : 'none';
+
   const freeEl = document.getElementById('dash-free');
   freeEl.textContent = fmt(fr);
   freeEl.style.color = fr >= 0 ? 'var(--text)' : 'var(--accent2)';
+
+  // Объясняющая подпись под главным числом: показываем, из чего собирается остаток
+  const explainEl = document.getElementById('dash-free-explain');
+  if (explainEl) {
+    if (inc > 0) {
+      const parts = [`доход ${fmt(inc)}`, `обяз −${fmt(exp)}`, `кред −${fmt(cr)}`];
+      if (goalsMonthly > 0) parts.push(`цели −${fmt(goalsMonthly)}`);
+      if (habitsMonthly > 0) parts.push(`привычки −${fmt(habitsMonthly)}`);
+      explainEl.textContent = parts.join(' · ');
+    } else {
+      explainEl.textContent = '';
+    }
+  }
 
   // ── Месяц · поток: обновляем стек-бар и пилюлю «savings rate» ──
   try {
     const stack = document.getElementById('mf-stack');
     if (stack) {
-      const denom = Math.max(inc, exp + cr + Math.max(0, fr), 1);
+      const denom = Math.max(inc, exp + cr + goalsMonthly + habitsMonthly + Math.max(0, fr), 1);
       const segs = stack.querySelectorAll('.mf-seg');
       const w = (v) => `${Math.max(0, (v / denom) * 100)}%`;
+      // Порядок сегментов в HTML: exp, cr, goals, habits, free
       if (segs[0]) segs[0].style.width = w(exp);
       if (segs[1]) segs[1].style.width = w(cr);
-      if (segs[2]) segs[2].style.width = w(Math.max(0, fr));
+      if (segs[2]) segs[2].style.width = w(goalsMonthly);
+      if (segs[3]) segs[3].style.width = w(habitsMonthly);
+      if (segs[4]) segs[4].style.width = w(Math.max(0, fr));
     }
     const pill = document.getElementById('dash-free-pill');
     if (pill) {
@@ -5151,13 +5424,37 @@ function renderDashboard() {
   const sub = document.getElementById('dash-daily-sub');
   const monthlyFree = snapshot.monthlyFree;
   const dailyHeader = document.getElementById('dash-daily-header');
+  const formula = document.getElementById('dash-daily-formula');
+
+  // Заполнение мини-формулы под прогресс-баром (общее для всех веток ниже)
+  const fillFormula = () => {
+    if (!formula) return;
+    if (inc === 0) { formula.innerHTML = ''; formula.classList.remove('danger'); return; }
+    const goalsMonth = snapshot.goalsMonthlyContrib || 0;
+    const habitsMonth = snapshot.habitsMonthly || 0;
+    const rows = [
+      `<div class="df-row"><span>Доход / мес</span><strong>${fmt(inc)}</strong></div>`,
+      `<div class="df-row"><span>− Обязательные</span><span>${fmt(exp)}</span></div>`,
+      cr > 0 ? `<div class="df-row"><span>− Кредиты</span><span>${fmt(cr)}</span></div>` : '',
+      goalsMonth > 0 ? `<div class="df-row"><span>− Цели</span><span>${fmt(goalsMonth)}</span></div>` : '',
+      habitsMonth > 0 ? `<div class="df-row"><span>− Привычки</span><span>${fmt(habitsMonth)}</span></div>` : '',
+      `<div class="df-row total"><span>${monthlyFree < 0 ? 'Дефицит' : 'Свободно на жизнь / мес'}</span><strong style="color:${monthlyFree < 0 ? 'var(--accent2)' : 'var(--good)'}">${monthlyFree < 0 ? '−' + fmt(-monthlyFree) : fmt(monthlyFree)}</strong></div>`,
+    ].filter(Boolean).join('');
+    const denomDays = Math.max(1, daysLeftInMonth());
+    const dailyLine = monthlyFree > 0
+      ? `<div class="df-row total"><span>÷ ${denomDays} дн. до конца месяца</span><strong>≈ ${fmt(monthlyFree / denomDays)}/день</strong></div>`
+      : `<div class="df-row total"><span>На жизнь в этом месяце</span><strong style="color:var(--accent2)">0 ₽/день</strong></div>`;
+    formula.innerHTML = `<span class="df-title">Откуда дневной бюджет</span>${rows}${dailyLine}`;
+    formula.classList.toggle('danger', monthlyFree < 0);
+  };
+  fillFormula();
 
   if (inc === 0) {
     sub.textContent = 'Добавь доходы для расчёта';
   } else if (monthlyFree < 0) {
     // Красная ситуация: обязательства + цели + привычки > дохода
     const deficit = -monthlyFree;
-    sub.innerHTML = `⛔ Обязательства+цели+привычки на <strong>${fmt(deficit)}</strong> в месяц превышают доход. На ежедневные траты в бюджете ноль — пока дефицит не закрыт, любая трата ухудшает картину.`;
+    sub.innerHTML = `⛔ Цели и привычки сейчас «съедают» доход на <strong>${fmt(deficit)}</strong> сверх обязательных. Это значит: либо сократить взносы на цели/привычки (вкладки «Цели» и «Привычки»), либо нарастить доход. До этого момента дневной лимит = 0.`;
   } else if (snapshot.nextPayDate && snapshot.budgetDays >= 3 && snapshot.rawDaily <= snapshot.sustainableDaily * 2) {
     // В обычном режиме — показываем, сколько можно до выплаты
     const extra = snapshot.scheduledDebits > 0 ? ` · до ЗП спишется ещё ${fmt(snapshot.scheduledDebits)}` : '';
@@ -5204,41 +5501,65 @@ function renderDashboard() {
     const capTotal = capExp + capCr + capGoals + capHabits;
     const safeFree = Math.max(0, snapshot.nextPayAmount - capTotal);
 
-    const habitsBlock = snapshot.reserveHabits > 0 ? `
-        <div>
-          <div style="font-size:11px;color:var(--muted)">На привычки</div>
-          <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:#ff9f4f">${fmt(capHabits)}</div>
-        </div>` : '';
-    const gridClass = snapshot.reserveHabits > 0 ? 'grid-4' : 'grid-3';
+    // Раскрывашка-плашка: <details> с заголовком и списком статей внутри.
+    // items: [{name, monthly}] — оригинальная месячная сумма каждой статьи.
+    // scale — доля этой выплаты в месячном плане (0..1).
+    const buildPlanRow = (label, capAmt, color, items, scale) => {
+      if (capAmt <= 0 && items.length === 0) return '';
+      const partial = scale < 0.99;
+      const scaleHint = partial ? ` <span style="color:var(--muted);font-weight:400;font-size:10px">· ${Math.round(scale * 100)}% от месяца</span>` : '';
+      const innerRows = items
+        .filter(it => (it.monthly || 0) > 0)
+        .sort((a, b) => b.monthly - a.monthly)
+        .map(it => {
+          const share = (it.monthly || 0) * scale;
+          const fullSuffix = partial
+            ? `<span style="color:var(--muted);font-size:10.5px;margin-left:6px">из ${fmt(it.monthly)}/мес</span>`
+            : '';
+          return `<div class="plan-detail-row">
+            <span class="plan-detail-name">${esc(it.name || '—')}</span>
+            <span class="plan-detail-amt">${fmt(share)}${fullSuffix}</span>
+          </div>`;
+        }).join('');
+      const innerHtml = innerRows || `<div class="plan-detail-empty">Здесь пока ничего нет — добавь статью в нужной вкладке.</div>`;
+      return `<details class="plan-card">
+        <summary class="plan-card-summary">
+          <span class="plan-card-chev" aria-hidden="true">▸</span>
+          <div class="plan-card-text">
+            <div class="plan-card-label">${label}${scaleHint}</div>
+            <div class="plan-card-amt" style="color:${color}">${fmt(capAmt)}</div>
+          </div>
+        </summary>
+        <div class="plan-card-body">${innerHtml}</div>
+      </details>`;
+    };
+
+    // Собираем оригинальные месячные суммы по каждой статье
+    const expItems = (state.expenses || []).map(e => ({ name: e.name || e.cat || 'Расход', monthly: e.amount || 0 }));
+    const crItems = activeCredits().map(c => ({ name: c.name || 'Кредит', monthly: creditMonthlyEq(c) }));
+    const goalItems = (state.goals || []).filter(g => !g.paused).map(g => ({ name: g.name || 'Цель', monthly: g.monthly || 0 }));
+    const habitItems = (state.habits || []).filter(h => h.active !== false).map(h => ({ name: h.name || 'Привычка', monthly: habitMonthlyCost(h) }));
+
+    const cards = [
+      buildPlanRow('На обязательные', capExp, 'var(--text)', expItems, scale),
+      buildPlanRow('На кредиты', capCr, 'var(--accent2)', crItems, scale),
+      buildPlanRow('На цели', capGoals, 'var(--accent3)', goalItems, scale),
+      buildPlanRow('На привычки', capHabits, '#ff9f4f', habitItems, scale),
+    ].filter(Boolean).join('');
 
     // Основной сигнал: либо по факту помещаемся, либо дефицит
     const summaryAlert = fitsPay
-      ? `<div class="alert" style="margin-bottom:0">
+      ? `<div class="alert" style="margin-bottom:0;margin-top:12px">
           С ближайшей выплаты <strong>${fmt(snapshot.nextPayAmount)}</strong> разумно сразу отложить <strong>${fmt(capTotal)}</strong>.
           На обычную жизнь после этого останется примерно <strong>${fmt(safeFree)}</strong>.
         </div>`
-      : `<div class="alert danger" style="margin-bottom:0">
+      : `<div class="alert danger" style="margin-bottom:0;margin-top:12px">
           ⛔ Обязательства на эту часть месяца — <strong>${fmt(snapshot.reserveTotal)}</strong>, а выплата <strong>${fmt(snapshot.nextPayAmount)}</strong>.
-          Не хватает <strong>${fmt(deficit)}</strong>. Числа выше уменьшены пропорционально, чтобы влезли в выплату, но что-то придётся сдвинуть:
-          либо часть кредита/цели переносить на следующую выплату, либо сократить обязательные, либо добавить доход.
+          Не хватает <strong>${fmt(deficit)}</strong>. Числа в плашках уже уменьшены пропорционально, чтобы влезли в выплату — но что-то всё равно придётся сдвинуть:
+          либо часть кредита/цели на следующую выплату, либо сократить обязательные, либо добавить доход.
         </div>`;
 
-    payPlan.innerHTML = `
-      <div class="${gridClass}" style="margin-bottom:12px">
-        <div>
-          <div style="font-size:11px;color:var(--muted)">На обязательные</div>
-          <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700">${fmt(capExp)}</div>
-        </div>
-        <div>
-          <div style="font-size:11px;color:var(--muted)">На кредиты</div>
-          <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:var(--accent2)">${fmt(capCr)}</div>
-        </div>
-        <div>
-          <div style="font-size:11px;color:var(--muted)">На цели</div>
-          <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;color:var(--accent3)">${fmt(capGoals)}</div>
-        </div>${habitsBlock}
-      </div>
-      ${summaryAlert}`;
+    payPlan.innerHTML = `<div class="plan-cards">${cards}</div>${summaryAlert}`;
   } else {
     payPlan.innerHTML = '<div class="empty-state" style="padding:20px 0"><div class="empty-icon">📅</div>Добавь даты выплат, и здесь появится план по следующей зарплате.</div>';
   }
@@ -5406,13 +5727,14 @@ function computePaycheckAllocations() {
       : new Date(from.getTime() + 30 * 24 * 3600 * 1000);
 
     const outflows = [];
-    // Кредиты в окне — паузные пропускаем
+    // Кредиты в окне — паузные пропускаем. splitAcrossPaychecks обработается post-process'ом ниже.
     (state.credits || []).forEach(cr => {
       if (cr.paused) return;
       const dates = creditChargeDatesInRange(cr, from, to);
       dates.forEach(d => outflows.push({
         kind: 'credit', name: cr.name, amount: cr.monthly || 0, date: d, payDay: d.getDate(),
-        hasBalance: !!cr.balanceId, creditKind: cr.kind || 'mandatory'
+        hasBalance: !!cr.balanceId, creditKind: cr.kind || 'mandatory',
+        creditId: cr.id, splitAcrossPaychecks: !!cr.splitAcrossPaychecks
       }));
     });
     // Запланированные расходы с payDay, покрываются только необеспеченная часть (за вычетом BitZone и т.п.)
@@ -5444,6 +5766,38 @@ function computePaycheckAllocations() {
     allocations.push({ paycheck: pc, outflows, total, nextPaycheck: next || null });
     if (allocations.length >= 2) break; // две ближайшие выплаты
   }
+
+  // POST-PROCESS: split-кредиты — половина переезжает в ПРЕДЫДУЩУЮ выплату.
+  // Идём от последней allocation к первой; для каждого credit-outflow с splitAcrossPaychecks=true
+  // делим amount пополам, копию с тем же amount/датой добавляем в предыдущую allocation.
+  // Так в обеих ЗП появится "½ от платежа" и план становится сбалансированным.
+  for (let k = allocations.length - 1; k >= 1; k--) {
+    const curr = allocations[k];
+    const prev = allocations[k - 1];
+    const additionsToPrev = [];
+    curr.outflows.forEach(o => {
+      if (o.kind !== 'credit' || !o.splitAcrossPaychecks || o._splitDone) return;
+      if (!(o.amount > 0)) return;
+      const half = o.amount / 2;
+      o.amount = half;
+      o.name = (o.name && o.name.includes('½')) ? o.name : (o.name + ' (½)');
+      o._splitDone = true;
+      additionsToPrev.push({
+        kind: 'credit', name: o.name, amount: half, date: o.date, payDay: o.payDay,
+        hasBalance: o.hasBalance, creditKind: o.creditKind,
+        creditId: o.creditId, splitAcrossPaychecks: true, _splitDone: true
+      });
+    });
+    if (additionsToPrev.length) {
+      prev.outflows.push(...additionsToPrev);
+    }
+  }
+  // Пересчитываем total и пересортировываем для каждой allocation
+  allocations.forEach(al => {
+    al.outflows.sort((a, b) => a.date - b.date);
+    al.total = al.outflows.reduce((s, o) => s + o.amount, 0);
+  });
+
   return allocations;
 }
 
@@ -5478,7 +5832,9 @@ function renderPaycheckSplit() {
         const icon = o.kind === 'credit' ? '🏦' : '📅';
         const color = o.kind === 'credit' ? 'var(--accent2)' : '#ff9f4f';
         const covNote = (o.kind === 'expense' && o.coverage > 0)
-          ? `<div style="font-size:10px;color:var(--muted)">из ${fmt(o.fullAmount)} покрыто ${fmt(o.coverage)} зарезервированным доходом</div>`
+          ? `<div style="font-size:11px;color:var(--accent);margin-top:2px;line-height:1.45" title="Зарезервированный доход — это доход, привязанный к этому расходу через вкладку «Доходы → Куда копится». Он копится фоном и автоматически уменьшает то, что нужно докинуть с зарплаты.">
+              💎 Полная сумма ${fmt(o.fullAmount)} ₽ — из них ${fmt(o.coverage)} ₽ уже копится фоновым доходом, доплатить с этой выплаты: <strong>${fmt(o.amount)} ₽</strong>
+            </div>`
           : '';
         const balNote = o.hasBalance
           ? '<span style="font-size:10px;color:var(--accent)">·авто</span>'
@@ -8124,10 +8480,10 @@ function renderSubAudit() {
   const card = document.getElementById('dash-subaudit-card');
   if (!card) return;
 
-  // 1. Explicit monthly expenses in "Подписки" or type fixed
+  // 1. Явные ежемесячные расходы (категория «📱 Подписки» или type='fixed')
   const monthlySubs = state.expenses.filter(e => e.cat === '📱 Подписки' || e.type === 'fixed');
 
-  // 2. Detect recurring tx by name (same normalized name >=2 times over last 90 days)
+  // 2. Ищем повторяющиеся транзакции по нормализованному имени за 90 дней
   const cutoff = ymdFromDaysAgo(90);
   const map = {};
   state.transactions
@@ -8142,99 +8498,197 @@ function renderSubAudit() {
       map[key].amounts.push(t.amount);
     });
 
-  const recurring = Object.values(map)
-    .filter(g => g.count >= 2)
-    .map(g => ({ ...g, avg: g.total / g.count }))
-    .sort((a, b) => b.total - a.total);
+  // Классификация: настоящая подписка vs просто частая трата
+  // Подписка = одинаковая сумма (CV < 0.1) И интервал ≈ 7 / 14 / 30 дней
+  const classify = g => {
+    const n = g.amounts.length;
+    const mean = n > 0 ? g.amounts.reduce((s, a) => s + a, 0) / n : 0;
+    const sd = n > 0 ? Math.sqrt(g.amounts.reduce((s, a) => s + (a - mean) ** 2, 0) / n) : 0;
+    const cv = mean > 0 ? sd / mean : 1;
+    const sorted = g.dates.slice().sort();
+    const intervals = [];
+    for (let i = 1; i < sorted.length; i++) {
+      const d1 = new Date(sorted[i - 1]);
+      const d2 = new Date(sorted[i]);
+      intervals.push((d2 - d1) / (1000 * 60 * 60 * 24));
+    }
+    const avgInt = intervals.length > 0 ? intervals.reduce((s, x) => s + x, 0) / intervals.length : 0;
+    const periodMatch = (lo, hi) => avgInt >= lo && avgInt <= hi;
+    const isSub = cv < 0.1 && (periodMatch(6, 8) || periodMatch(13, 16) || periodMatch(25, 33));
+    let periodLabel = '';
+    if (periodMatch(6, 8)) periodLabel = 'еженедельно';
+    else if (periodMatch(13, 16)) periodLabel = 'раз в 2 недели';
+    else if (periodMatch(25, 33)) periodLabel = 'ежемесячно';
+    return { ...g, mean, cv, avgInt, isSub, periodLabel, lastDate: sorted[sorted.length - 1] };
+  };
 
-  if (monthlySubs.length === 0 && recurring.length === 0) { card.style.display = 'none'; return; }
+  const classified = Object.values(map).filter(g => g.count >= 2).map(classify);
+  const realSubs = classified.filter(g => g.isSub).sort((a, b) => b.mean - a.mean);
+  const frequent = classified.filter(g => !g.isSub).sort((a, b) => b.total - a.total);
+
+  if (monthlySubs.length === 0 && classified.length === 0) { card.style.display = 'none'; return; }
   card.style.display = 'block';
 
+  // 3. Рендер: блок «Настоящие подписки» (monthlySubs + realSubs)
   let html = '';
-  monthlySubs.forEach(e => {
-    html += `<div class="sub-row">
-      <div>
-        <div style="font-size:14px;font-weight:600">${esc(e.name)}</div>
-        <div class="sub-meta">${esc(e.cat)} · ежемесячно${e.payDay ? ` · ${e.payDay} числа` : ''}</div>
-      </div>
-      <div class="sub-amt">${fmt(e.amount)}/мес</div>
-    </div>`;
+  const allSubs = [
+    ...monthlySubs.map(e => ({
+      name: e.name, cat: e.cat,
+      mean: e.amount, periodLabel: 'ежемесячно',
+      payDay: e.payDay || null,
+      lastDate: null, source: 'expense'
+    })),
+    ...realSubs.map(r => ({
+      name: r.name, cat: r.cat,
+      mean: r.mean, periodLabel: r.periodLabel,
+      payDay: null,
+      lastDate: r.lastDate, avgInt: r.avgInt,
+      source: 'tx'
+    }))
+  ];
+
+  if (allSubs.length > 0) {
+    html += `<div class="subaudit-section-title">🔁 Настоящие подписки</div>`;
+    allSubs.forEach(s => {
+      const period = s.payDay ? `${s.periodLabel} · ${s.payDay} числа` : s.periodLabel;
+      html += `<div class="sub-row">
+        <div>
+          <div style="font-size:14px;font-weight:600">${esc(s.name || '—')}</div>
+          <div class="sub-meta">${esc(s.cat || '')} · ${esc(period)}</div>
+        </div>
+        <div class="sub-amt">${fmt(s.mean)}/${s.periodLabel === 'еженедельно' ? 'нед' : (s.periodLabel === 'раз в 2 недели' ? '2 нед' : 'мес')}</div>
+      </div>`;
+    });
+  }
+
+  if (frequent.length > 0) {
+    html += `<div class="subaudit-section-title" style="margin-top:16px">📊 Частые траты (не подписки)</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.45">Повторяются часто, но сумма или интервал плавают — скорее всего это покупки, такси, переводы.</div>`;
+    frequent.slice(0, 8).forEach(r => {
+      html += `<div class="sub-row">
+        <div>
+          <div style="font-size:14px;font-weight:600">${esc(r.name || '—')}</div>
+          <div class="sub-meta">${esc(r.cat || '')} · ${r.count} списаний за 90 дней · ≈${fmt(r.mean)} за раз</div>
+        </div>
+        <div class="sub-amt">${fmt(r.total)}</div>
+      </div>`;
+    });
+  }
+
+  // 4. Календарь на 30 дней — раскладка где какие подписки списываются
+  // Берём только реальные подписки + monthly expenses с payDay
+  const today = new Date(); today.setHours(0,0,0,0);
+  const days = Array.from({ length: 30 }, (_, i) => {
+    const d = new Date(today); d.setDate(today.getDate() + i);
+    return { date: d, iso: d.toISOString().slice(0, 10), day: d.getDate(), items: [] };
   });
-  recurring.slice(0, 6).forEach(r => {
-    html += `<div class="sub-row">
-      <div>
-        <div style="font-size:14px;font-weight:600">${esc(r.name)}</div>
-        <div class="sub-meta">${esc(r.cat)} · ${r.count} списаний за 90 дней · ≈${fmt(r.avg)} за раз</div>
-      </div>
-      <div class="sub-amt">${fmt(r.total)}</div>
-    </div>`;
+  // monthlySubs с payDay → ставим на ближайший день месяца
+  monthlySubs.filter(e => e.payDay).forEach(e => {
+    const slot = days.find(x => x.day === e.payDay);
+    if (slot) slot.items.push({ name: e.name, amount: e.amount });
   });
+  // recurring настоящие подписки — экстраполируем по lastDate + avgInt
+  realSubs.forEach(r => {
+    if (!r.lastDate || !r.avgInt) return;
+    let next = new Date(r.lastDate);
+    next.setHours(0, 0, 0, 0);
+    for (let it = 0; it < 6; it++) {
+      next = new Date(next.getTime() + r.avgInt * 24 * 3600 * 1000);
+      if (next < today) continue;
+      const slot = days.find(d => d.iso === next.toISOString().slice(0, 10));
+      if (slot) slot.items.push({ name: r.name, amount: r.mean });
+      if (next > new Date(today.getTime() + 30 * 24 * 3600 * 1000)) break;
+    }
+  });
+  const hasAny = days.some(d => d.items.length > 0);
+  if (hasAny) {
+    html += `<div class="subaudit-section-title" style="margin-top:16px">📅 Календарь подписок · 30 дней</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.45">Какие подписки спишутся в ближайшие 30 дней — чтобы заранее понимать пики расходов.</div>
+      <div class="sub-calendar">`;
+    days.forEach(d => {
+      const sum = d.items.reduce((s, it) => s + (it.amount || 0), 0);
+      const tone = sum >= 3000 ? 'hot' : (sum > 0 ? 'warm' : '');
+      const tipLines = d.items.map(it => `${it.name}: ${fmt(it.amount)}`).join('\n');
+      const dayLabel = d.date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+      html += `<div class="sub-cal-cell ${tone}" title="${esc(tipLines)}">
+        <div class="sub-cal-day">${d.day}</div>
+        ${sum > 0 ? `<div class="sub-cal-sum">${fmt(sum).replace(' ₽', '')}</div>` : ''}
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
   document.getElementById('dash-subaudit-list').innerHTML = html;
 
-  const monthly = monthlySubs.reduce((s, e) => s + e.amount, 0) + recurring.reduce((s, r) => s + r.avg, 0);
-  document.getElementById('dash-subaudit-sum').textContent = `≈ ${fmt(monthly)}/мес · ${fmt(monthly * 12)}/год`;
+  const monthlyTotal = monthlySubs.reduce((s, e) => s + e.amount, 0)
+    + realSubs.reduce((s, r) => {
+        // нормализуем в месячный эквивалент
+        if (r.periodLabel === 'еженедельно') return s + r.mean * 4.33;
+        if (r.periodLabel === 'раз в 2 недели') return s + r.mean * 2.17;
+        return s + r.mean;
+      }, 0);
+  document.getElementById('dash-subaudit-sum').textContent = `≈ ${fmt(monthlyTotal)}/мес · ${fmt(monthlyTotal * 12)}/год`;
 }
 
-// --- What-if simulator ---
-const WHATIF_STATE = {};
-function renderWhatIf() {
-  const card = document.getElementById('dash-whatif-card');
-  if (!card) return;
-
-  const cats = {};
-  currentMonthTransactions().filter(t => t.type !== 'income').forEach(t => {
-    cats[t.cat] = (cats[t.cat] || 0) + t.amount;
-  });
-  state.expenses.forEach(e => { cats[e.cat] = (cats[e.cat] || 0) + e.amount; });
-  const sorted = Object.entries(cats).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  if (sorted.length === 0) { card.style.display = 'none'; return; }
+// --- Расширенная разбивка метрик финансового здоровья (заменяет «Что если»-симулятор) ---
+function renderHealthMetrics() {
+  const card = document.getElementById('dash-health-metrics-card');
+  const list = document.getElementById('dash-health-metrics-list');
+  if (!card || !list) return;
+  const res = computeHealthScore();
+  if (!res || res.score === null) { card.style.display = 'none'; return; }
   card.style.display = 'block';
 
-  const wrap = document.getElementById('dash-whatif-sliders');
-  wrap.innerHTML = sorted.map(([cat, amt]) => {
-    const key = cat;
-    const cur = WHATIF_STATE[key] ?? 0;
-    return `
-      <div class="whatif-row" data-cat="${key}" data-amt="${amt}">
-        <div class="whatif-head">
-          <span class="whatif-cat">${cat}</span>
-          <span>
-            <span style="color:var(--muted)">сейчас ${fmt(amt)}/мес →</span>
-            <span class="whatif-save" data-save>экономия 0 ₽</span>
-          </span>
-        </div>
-        <input class="whatif" type="range" min="0" max="80" step="5" value="${cur}" oninput="updateWhatIf(this)">
-        <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:10px;color:var(--muted)">
-          <span>урезать на 0%</span>
-          <span data-pct>${cur}%</span>
-          <span>80%</span>
-        </div>
-      </div>`;
-  }).join('');
-  recalcWhatIf();
-}
-function updateWhatIf(slider) {
-  const row = slider.closest('.whatif-row');
-  const cat = row.dataset.cat;
-  const amt = parseFloat(row.dataset.amt);
-  const pct = parseInt(slider.value, 10);
-  WHATIF_STATE[cat] = pct;
-  const save = amt * pct / 100;
-  row.querySelector('[data-save]').textContent = `экономия ${fmt(save)}`;
-  row.querySelector('[data-pct]').textContent = `${pct}%`;
-  recalcWhatIf();
-}
-function recalcWhatIf() {
-  let total = 0;
-  document.querySelectorAll('#dash-whatif-sliders .whatif-row').forEach(row => {
-    const amt = parseFloat(row.dataset.amt);
-    const pct = WHATIF_STATE[row.dataset.cat] ?? 0;
-    total += amt * pct / 100;
-  });
-  const m = document.getElementById('dash-whatif-save');
-  const y = document.getElementById('dash-whatif-year');
-  if (m) m.textContent = fmt(total);
-  if (y) y.textContent = fmt(total * 12);
+  const c = res.components;
+  const inc = totalIncome();
+  const cr = totalCredits();
+  const exp = totalExpenses();
+
+  // Светофор по баллам метрики (из 25)
+  const tone = pts => (pts >= 20 ? 'good' : (pts >= 10 ? 'warn' : 'bad'));
+  const toneLabel = pts => (pts >= 20 ? 'норма' : (pts >= 10 ? 'подтянуть' : 'слабо'));
+
+  // Текст «как улучшить» под каждую метрику
+  const tips = {
+    debt: c.debtPts >= 20
+      ? 'Кредитная нагрузка в пределах нормы (≤30% от дохода).'
+      : (inc > 0 ? `Платежи по кредитам ≈${Math.round((cr / inc) * 100)}% от дохода. Банки считают здоровым ≤30%, критичным — 50%+. Снизить можно рефинансированием, досрочкой или дополнительным доходом.` : 'Долги есть, но дохода в трекере нет — добавь источники дохода для корректного расчёта.'),
+    save: c.savePts >= 20
+      ? `Норма накоплений ${Math.round((c.saveRate || 0) * 100)}% — отлично. Стандарт: 20%+.`
+      : (c.saveRate <= 0
+          ? 'Каждый месяц ты в нуле или минусе — нет запаса на форс-мажор. Цель: откладывать хотя бы 10% в день зарплаты автопереводом.'
+          : `Сейчас откладывается ≈${Math.round(c.saveRate * 100)}% дохода. Норма — 20%. Не хватает ≈${fmt(inc * 0.2 - (inc - exp - cr))}/мес.`),
+    cushion: c.cushionPts >= 20
+      ? `На счетах ${c.cushionMonths.toFixed(1)} мес обязательных расходов — финансовая подушка крепкая (норма: 6+ мес).`
+      : (c.cushionMonths <= 0
+          ? 'Подушки нет совсем. Минимум — 3 месяца обязательных расходов на отдельном счёте, в идеале — 6.'
+          : `Подушка покрывает ${c.cushionMonths.toFixed(1)} мес. До нормы (6 мес) ещё ≈${fmt((exp + cr) * 6 - (state.balances || []).reduce((s, b) => s + toRub(b.amount, b.currency), 0))}.`),
+    pace: c.pacePts >= 20
+      ? 'В этом месяце идёшь по плану — траты соответствуют графику.'
+      : (c.paceRatio >= 1.3
+          ? 'Темп трат заметно выше плана. К концу месяца рискуешь уйти в перерасход — посмотри «Прогноз к концу месяца» и сократи разовые траты.'
+          : 'Темп трат немного выше плана. Не критично, но к концу месяца дневной лимит будет уменьшаться.')
+  };
+
+  const metric = (label, pts, valText, tip, key) => {
+    const t = tone(pts);
+    return `<div class="hmetric hmetric-${t}">
+      <div class="hmetric-head">
+        <span class="hmetric-light hmetric-light-${t}" aria-hidden="true"></span>
+        <span class="hmetric-name">${label}</span>
+        <span class="hmetric-pts">${pts}<span class="hmetric-pts-of">/25</span></span>
+      </div>
+      <div class="hmetric-val">${valText} · <span class="hmetric-tone hmetric-tone-${t}">${toneLabel(pts)}</span></div>
+      <div class="hmetric-tip">${esc(tip)}</div>
+    </div>`;
+  };
+
+  list.innerHTML = [
+    metric('Долговая нагрузка', c.debtPts, inc > 0 ? `${Math.round((cr / inc) * 100)}% дохода уходит на кредиты` : 'нет данных по доходу', tips.debt, 'debt'),
+    metric('Норма накоплений', c.savePts, `${Math.round((c.saveRate || 0) * 100)}% откладывается ежемесячно`, tips.save, 'save'),
+    metric('Подушка безопасности', c.cushionPts, `${c.cushionMonths.toFixed(1)} мес обязательных расходов`, tips.cushion, 'cushion'),
+    metric('Темп трат', c.pacePts, `${Math.round((c.paceRatio || 1) * 100)}% от планового темпа`, tips.pace, 'pace'),
+  ].join('');
 }
 
 // --- Quick-add sheet ---
@@ -8257,10 +8711,29 @@ function openQuickSheet() {
   renderQuickGrid();
   document.getElementById('quick-amt').value = '';
   document.getElementById('quick-name').value = '';
+  // Сбрасываем дату на сегодня и выделяем чип «Сегодня»
+  setQuickDateOffset(0);
   quickBad = false;
   syncQuickBadUi();
   refreshQuickBalanceSelect();
   setTimeout(() => document.getElementById('quick-amt').focus(), 200);
+}
+
+function setQuickDateOffset(offset, ev) {
+  if (ev) ev.preventDefault();
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  const iso = d.toISOString().slice(0, 10);
+  const input = document.getElementById('quick-date');
+  if (input) input.value = iso;
+  document.querySelectorAll('#quick-date-chips .date-chip').forEach(c => {
+    c.classList.toggle('active', Number(c.dataset.offset) === offset);
+  });
+}
+
+function onQuickDateInput() {
+  // При ручном выборе даты снимаем активность с пресет-чипов
+  document.querySelectorAll('#quick-date-chips .date-chip').forEach(c => c.classList.remove('active'));
 }
 
 function toggleQuickBad() {
@@ -8353,8 +8826,13 @@ function submitQuick() {
     bad = true; // в быстром флоу не спрашиваем — просто тегаем
   }
 
+  // Дата траты: из инпута (для пропущенных дней), иначе сегодня
+  const dateInput = document.getElementById('quick-date');
+  const chosenDate = (dateInput && dateInput.value && /^\d{4}-\d{2}-\d{2}$/.test(dateInput.value))
+    ? dateInput.value : todayIso();
+
   const tx = {
-    id: safeId(), date: todayIso(), name, amount: amt,
+    id: safeId(), date: chosenDate, name, amount: amt,
     cat: quickPick.cat, type: 'expense', bad
   };
 
@@ -8397,7 +8875,7 @@ function renderV2() {
   try { renderPacing(); } catch (e) { console.error(e); }
   try { renderInsights(); } catch (e) { console.error(e); }
   try { renderSubAudit(); } catch (e) { console.error(e); }
-  try { renderWhatIf(); } catch (e) { console.error(e); }
+  try { renderHealthMetrics(); } catch (e) { console.error(e); }
 }
 
 // ===== INIT =====
@@ -8437,9 +8915,24 @@ function showPendingEventsPrompt(opts) {
   const pendingCredits = (typeof findPendingCreditDeductions === 'function') ? findPendingCreditDeductions() : [];
   if (!pendingIncomes.length && !pendingDeductions.length && !pendingCredits.length) return;
 
-  // Троттлинг: модалка раздражает при каждом входе. Показываем автоматически не чаще
-  // одного раза в день. При ручном вызове (кнопка) — всегда.
+  // Окно показа автоматической плашки: ±PAY_WINDOW_DAYS от любого pay-day.
+  // Раньше плашка вылазила каждый день, что раздражало. Теперь — только перед/после выплаты.
+  // Для деталей: pendingIncomes[].overdueDays >= 0 — выплата ожидалась/прошла N дней назад;
+  // < 0 — выплата ещё в будущем через |N| дней. Близкие к нулю — в окне.
+  // При ручном вызове (кнопка в Настройках / меню) показываем всегда.
   if (!force) {
+    const PAY_WINDOW_DAYS = 2;
+    if (pendingIncomes.length > 0) {
+      const inIncomeWindow = pendingIncomes.some(p => Math.abs(p.overdueDays || 0) <= PAY_WINDOW_DAYS);
+      // Если все доходы далеко от окна выплаты — модалку не показываем
+      // (списания/кредиты сами по себе НЕ должны навязывать модалку каждый день).
+      if (!inIncomeWindow) return;
+    } else {
+      // Только списания/кредиты, без ожидаемых доходов — модалку автоматически не показываем.
+      // Пользователь сам зайдёт в нужную вкладку, если хочет отметить плановое списание.
+      return;
+    }
+    // Дополнительный троттлинг: даже в окне — не чаще раза в день
     try {
       const todayKey = todayIso();
       const lastShown = localStorage.getItem('pendingPromptLastShown');
