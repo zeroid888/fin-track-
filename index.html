@@ -1522,6 +1522,7 @@ button:focus, a:focus { outline: none; }
   <button class="tab" onclick="showPage('goals', event)"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg><span>Цели</span></button>
   <button class="tab" onclick="showPage('habits', event)"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 4v4h-4"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 20v-4h4"/></svg><span>Привычки</span></button>
   <button class="tab" onclick="showPage('import', event)"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg><span>Импорт</span></button>
+  <button class="tab" onclick="showPage('reviews', event)"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-6"/><path d="M3 20h18"/></svg><span>Итоги</span></button>
   <button class="tab" onclick="showPage('tips', event)"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 21h4"/><path d="M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3z"/></svg><span>Советы</span></button>
 </div>
 
@@ -2450,6 +2451,12 @@ button:focus, a:focus { outline: none; }
   </div>
 </div>
 
+<div id="page-reviews" class="page">
+  <div class="section-title">Итоги месяцев</div>
+  <div style="font-size:12px;color:var(--muted);margin:-4px 0 14px;line-height:1.5">Как идёт текущий месяц и чем закончились прошлые: доход против плана, куда ушли деньги, что улучшить.</div>
+  <div id="reviews-content"></div>
+</div>
+
 <!-- V2: Floating quick-add -->
 <div class="toast" id="toast"></div>
 <button class="fab" id="fab" title="Быстро добавить трату" onclick="openQuickSheet()">＋</button>
@@ -2529,7 +2536,9 @@ let state = {
   rates: { USD: 75, USDT: 75 },
   lastImport: null,
   userRules: [],    // правила автокатегоризации, заданные пользователем через UI «Переразметить контрагентов». { key, cat, createdAt }
-  avgCheckTarget: null // ₽/день — целевой средний чек на жизнь (ориентир); null = считать из истории транзакций
+  avgCheckTarget: null, // ₽/день — целевой средний чек на жизнь (ориентир); null = считать из истории транзакций
+  monthlyReviews: {}, // итоги закрытых месяцев: 'YYYY-MM' → замороженный объект разбора (computeMonthlyReview)
+  lastReviewSeen: null // 'YYYY-MM' — последний месяц, для которого показана авто-модалка итога (защита от повтора)
 };
 
 // AUDIT P0-5 [FIXED 2026-05-14] | save() обёрнут в try/catch + блокировка через __SAVE_BLOCKED__,
@@ -2561,7 +2570,7 @@ function load() {
       // 1. Берём всё, что было сохранено, поверх дефолтов
       // AUDIT P0-8 [FIXED 2026-05-14] | Whitelist разрешённых ключей — мусор/фантомы из бэкапа
       // в state не попадают. При будущем переименовании поля добавь шаг миграции ниже.
-      const ALLOWED_KEYS = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances', 'rates', 'lastImport', 'userRules', 'avgCheckTarget'];
+      const ALLOWED_KEYS = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances', 'rates', 'lastImport', 'userRules', 'avgCheckTarget', 'monthlyReviews', 'lastReviewSeen'];
       ALLOWED_KEYS.forEach(k => {
         if (parsed[k] !== undefined) state[k] = parsed[k];
       });
@@ -2586,6 +2595,10 @@ function load() {
 
       // Целевой средний чек на жизнь: положительное число или null (null = считать из истории).
       if (state.avgCheckTarget != null && (typeof state.avgCheckTarget !== 'number' || !isFinite(state.avgCheckTarget) || state.avgCheckTarget <= 0)) state.avgCheckTarget = null;
+
+      // Итоги месяцев: карта 'YYYY-MM' → замороженный объект разбора; lastReviewSeen — строка YYYY-MM или null.
+      if (!state.monthlyReviews || typeof state.monthlyReviews !== 'object' || Array.isArray(state.monthlyReviews)) state.monthlyReviews = {};
+      if (typeof state.lastReviewSeen !== 'string' || !/^\d{4}-\d{2}$/.test(state.lastReviewSeen)) state.lastReviewSeen = null;
 
       // 3. Добавляем новые поля старым записям (backward-compat)
       state.incomes.forEach(i => {
@@ -8570,6 +8583,252 @@ function showPageDirect(name) {
 }
 
 // ===== RENDER ALL =====
+// ===== ИТОГИ МЕСЯЦА (monthly review) =====
+// Ретроспектива закрытого месяца + живой просмотр текущего. Числа закрытых месяцев
+// замораживаются в state.monthlyReviews при первом расчёте (1-го числа), архив не пересчитывается.
+function reviewDaysInMonth(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  return new Date(y, m, 0).getDate(); // день 0 след. месяца = последний день этого
+}
+function reviewMonthLabel(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+}
+function prevMonthKey(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(y, m - 2, 1); // m-1 = текущий (0-based), ещё −1 = предыдущий
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+// Факт месяца из транзакций: доход/расход + разбивка расхода по категориям. Переводы исключаем (P0-3).
+function reviewFactForMonth(ym) {
+  const txs = (state.transactions || []).filter(t =>
+    /^\d{4}-\d{2}-\d{2}$/.test(t.date || '') &&
+    t.date.slice(0, 7) === ym &&
+    !isTransferTx(t)
+  );
+  let income = 0, expense = 0;
+  const catMap = {};
+  txs.forEach(t => {
+    const amt = t.amount || 0;
+    if (t.type === 'income') { income += amt; }
+    else {
+      expense += amt;
+      const c = t.cat || 'Без категории';
+      if (!catMap[c]) catMap[c] = { cat: c, sum: 0, count: 0 };
+      catMap[c].sum += amt; catMap[c].count++;
+    }
+  });
+  const cats = Object.values(catMap).sort((a, b) => b.sum - a.sum);
+  return { income, expense, cats, txCount: txs.length };
+}
+// План дохода именно за этот месяц (расписание выплат), а не «на сегодня».
+function reviewPlanIncome(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  return (state.incomes || []).reduce((s, inc) =>
+    s + incomeScheduleForMonth(inc, y, m - 1).reduce((a, ev) => a + (ev.amount || 0), 0), 0);
+}
+// Выводы по жёстким правилам (без ИИ): арифметика порогов. До 3 штук, приоритет — проблемам.
+function buildReviewInsights(d) {
+  const out = [];
+  if (d.net < 0) {
+    out.push({ tone: 'bad', text: `В минус на ${fmt(Math.abs(d.net))} — потратил больше, чем заработал.` });
+  }
+  if (d.planIncome > 0) {
+    const diff = d.income - d.planIncome;
+    const pct = diff / d.planIncome * 100;
+    if (pct <= -10) out.push({ tone: 'warn', text: `Доход недобрал ${fmt(Math.abs(diff))} к плану (−${Math.round(Math.abs(pct))}%).` });
+    else if (pct >= 10) out.push({ tone: 'good', text: `Доход перевыполнил план на ${fmt(diff)} (+${Math.round(pct)}%).` });
+  }
+  if (d.fact.expense > 0 && d.fact.cats.length > 1) {
+    const top = d.fact.cats[0];
+    const share = top.sum / d.fact.expense * 100;
+    if (share >= 35) out.push({ tone: 'warn', text: `${top.cat} съела ${Math.round(share)}% всех трат — ${fmt(top.sum)}.` });
+  }
+  if (d.hasPrev && d.prevAvgDay > 0 && !d.live) {
+    const pct = (d.avgDay - d.prevAvgDay) / d.prevAvgDay * 100;
+    if (pct >= 15) out.push({ tone: 'bad', text: `Темп трат вырос на ${Math.round(pct)}% к прошлому месяцу (${fmt(d.avgDay)}/день против ${fmt(d.prevAvgDay)}).` });
+    else if (pct <= -15) out.push({ tone: 'good', text: `Темп трат упал на ${Math.round(Math.abs(pct))}% к прошлому месяцу — так держать.` });
+  }
+  if (d.live && d.daysElapsed >= 3) {
+    out.push({ tone: 'warn', text: `Таким темпом к концу месяца выйдет ${fmt(d.projectedExpense)} трат.` });
+  }
+  if (d.net > 0 && !out.some(i => i.tone === 'good')) {
+    out.push({ tone: 'good', text: `Отложил ${fmt(d.net)} — месяц в плюс.` });
+  }
+  return out.slice(0, 3);
+}
+function computeMonthlyReview(ym, opts) {
+  opts = opts || {};
+  const live = !!opts.live;
+  const fact = reviewFactForMonth(ym);
+  const planIncome = reviewPlanIncome(ym);
+  const planExpense = totalExpenses() + totalCredits() + totalHabitsMonthly();
+  const totalDays = reviewDaysInMonth(ym);
+  const daysElapsed = live ? Math.max(1, Math.min(totalDays, new Date().getDate())) : totalDays;
+  const avgDay = daysElapsed > 0 ? fact.expense / daysElapsed : 0;
+  const projectedExpense = live ? avgDay * totalDays : fact.expense;
+
+  const pk = prevMonthKey(ym);
+  const prevFact = reviewFactForMonth(pk);
+  const prevDays = reviewDaysInMonth(pk);
+  const prevAvgDay = prevDays > 0 ? prevFact.expense / prevDays : 0;
+  const hasPrev = prevFact.txCount > 0;
+
+  const net = fact.income - fact.expense;
+  const insights = buildReviewInsights({ ym, live, fact, planIncome, planExpense, net, avgDay, prevFact, prevAvgDay, hasPrev, projectedExpense });
+
+  return {
+    ym, live,
+    income: fact.income, expense: fact.expense, net,
+    planIncome, planExpense,
+    cats: fact.cats,
+    avgDay, projectedExpense, totalDays, daysElapsed,
+    prev: hasPrev ? { ym: pk, income: prevFact.income, expense: prevFact.expense, avgDay: prevAvgDay } : null,
+    insights,
+    computedAt: todayIso()
+  };
+}
+// Один рендер для модалки и для архива. Возвращает HTML-строку. Цвета — только CSS-переменные.
+function renderMonthlyReviewBody(r) {
+  if ((r.income || 0) === 0 && (r.expense || 0) === 0) {
+    return `<div style="font-size:13px;color:var(--muted);padding:6px 0">Нет данных за этот месяц — ни доходов, ни трат не зафиксировано.</div>`;
+  }
+  const netColor = r.net >= 0 ? 'var(--good)' : 'var(--accent2)';
+  const incDiff = r.income - r.planIncome;
+  const expDiff = r.expense - r.planExpense;
+  const incSub = r.planIncome > 0
+    ? `план ${fmt(r.planIncome)} · <span style="color:${incDiff >= 0 ? 'var(--good)' : 'var(--accent2)'}">${incDiff >= 0 ? '+' : '−'}${fmt(Math.abs(incDiff))}</span>`
+    : 'план не задан';
+  const expSub = r.planExpense > 0
+    ? `план ${fmt(r.planExpense)} · <span style="color:${expDiff <= 0 ? 'var(--good)' : 'var(--accent2)'}">${expDiff <= 0 ? '−' : '+'}${fmt(Math.abs(expDiff))}</span>`
+    : 'план не задан';
+
+  const liveTag = r.live
+    ? `<div style="font-size:11px;color:var(--muted);margin-bottom:12px">идёт · прошло ${r.daysElapsed} из ${r.totalDays} дней · прогноз трат ${fmt(r.projectedExpense)}</div>`
+    : '';
+
+  const kpi = `
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
+      <div style="background:var(--surface2);border-radius:12px;padding:10px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)">Доход</div>
+        <div style="font-size:16px;font-weight:700;color:var(--good)">${fmt(r.income)}</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.4">${incSub}</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:12px;padding:10px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)">Расход</div>
+        <div style="font-size:16px;font-weight:700">${fmt(r.expense)}</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.4">${expSub}</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:12px;padding:10px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)">${r.net >= 0 ? 'Отложено' : 'В минус'}</div>
+        <div style="font-size:16px;font-weight:700;color:${netColor}">${r.net >= 0 ? '+' : '−'}${fmt(Math.abs(r.net))}</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.4">${fmt(r.avgDay)}/день</div>
+      </div>
+    </div>`;
+
+  let catsHtml = '';
+  if (r.cats && r.cats.length) {
+    const maxSum = r.cats[0].sum || 1;
+    const rows = r.cats.slice(0, 8).map(c => {
+      const w = Math.max(3, Math.round(c.sum / maxSum * 100));
+      const share = r.expense > 0 ? Math.round(c.sum / r.expense * 100) : 0;
+      return `
+        <div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+            <span>${esc(c.cat)} <span style="color:var(--muted)">· ${c.count}</span></span>
+            <span style="font-weight:600">${fmt(c.sum)} <span style="color:var(--muted);font-weight:400">${share}%</span></span>
+          </div>
+          <div style="height:6px;background:var(--surface3);border-radius:4px;overflow:hidden">
+            <div style="height:100%;width:${w}%;background:var(--accent3);border-radius:4px"></div>
+          </div>
+        </div>`;
+    }).join('');
+    catsHtml = `<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:6px 0 8px">Куда ушли деньги</div>${rows}`;
+  }
+
+  let cmpHtml = '';
+  if (r.prev) {
+    const row = (label, cur, prev, goodWhenLower) => {
+      const diff = cur - prev;
+      if (Math.abs(diff) < 1) return `<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0"><span style="color:var(--muted)">${label}</span><span>${fmt(cur)} <span style="color:var(--muted)">≈ как в прошлом</span></span></div>`;
+      const better = goodWhenLower ? diff < 0 : diff > 0;
+      const col = better ? 'var(--good)' : 'var(--accent2)';
+      return `<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0"><span style="color:var(--muted)">${label}</span><span>${fmt(cur)} <span style="color:${col}">${diff >= 0 ? '+' : '−'}${fmt(Math.abs(diff))}</span></span></div>`;
+    };
+    cmpHtml = `
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:16px 0 6px">Против ${esc(reviewMonthLabel(r.prev.ym))}</div>
+      ${row('Доход', r.income, r.prev.income, false)}
+      ${row('Расход', r.expense, r.prev.expense, true)}
+      ${row('Средний день', r.avgDay, r.prev.avgDay, true)}`;
+  }
+
+  let insHtml = '';
+  if (r.insights && r.insights.length) {
+    const dot = { good: 'var(--good)', warn: 'var(--accent3)', bad: 'var(--accent2)' };
+    insHtml = `<div style="margin-top:16px;display:flex;flex-direction:column;gap:8px">` +
+      r.insights.map(i => `
+        <div style="display:flex;gap:8px;align-items:flex-start;font-size:13px;line-height:1.45">
+          <span style="flex-shrink:0;width:7px;height:7px;border-radius:50%;background:${dot[i.tone] || 'var(--muted)'};margin-top:5px"></span>
+          <span>${esc(i.text)}</span>
+        </div>`).join('') +
+      `</div>`;
+  }
+
+  return liveTag + kpi + catsHtml + cmpHtml + insHtml;
+}
+function renderReviews() {
+  const host = document.getElementById('reviews-content');
+  if (!host) return;
+  const cur = computeMonthlyReview(currentMonthKey(), { live: true });
+  let html = `<div style="font-size:13px;font-weight:700;font-family:'Unbounded',sans-serif;margin:4px 0 10px">${esc(reviewMonthLabel(currentMonthKey()))} <span style="color:var(--muted);font-weight:400;font-size:11px">· сейчас</span></div>`;
+  html += `<div class="card">${renderMonthlyReviewBody(cur)}</div>`;
+  const keys = Object.keys(state.monthlyReviews || {}).sort().reverse();
+  if (keys.length) {
+    html += `<div class="section-title" style="margin-top:24px">Закрытые месяцы</div>`;
+    keys.forEach(k => {
+      const r = state.monthlyReviews[k];
+      if (!r) return;
+      const net = r.net || 0;
+      html += `<details class="card" style="margin-bottom:10px"><summary style="cursor:pointer;font-weight:600;font-family:'Unbounded',sans-serif;font-size:13px;list-style:none">${esc(reviewMonthLabel(k))} <span style="color:${net >= 0 ? 'var(--accent)' : 'var(--accent2)'};font-weight:400">· ${net >= 0 ? '+' : '−'}${fmt(Math.abs(net))}</span></summary><div style="margin-top:14px">${renderMonthlyReviewBody(r)}</div></details>`;
+    });
+  } else {
+    html += `<div style="font-size:12px;color:var(--muted);margin-top:18px;line-height:1.5">Закрытых месяцев пока нет. Итог за месяц появится здесь и всплывёт окном 1-го числа следующего месяца.</div>`;
+  }
+  host.innerHTML = html;
+}
+// 1-го числа (или при первом открытии в новом месяце) — показать разбор прошлого месяца один раз.
+function maybeShowMonthlyReview() {
+  const pk = prevMonthKey(currentMonthKey());
+  if (state.lastReviewSeen === pk) return;
+  const fact = reviewFactForMonth(pk);
+  if (fact.txCount === 0) { state.lastReviewSeen = pk; save(); return; } // нет данных — больше не дёргаем
+  const r = computeMonthlyReview(pk, { live: false });
+  state.monthlyReviews[pk] = r;
+  state.lastReviewSeen = pk;
+  save();
+  showMonthlyReviewModal(r);
+}
+function showMonthlyReviewModal(r) {
+  const host = document.getElementById('monthly-review-modal') || (() => {
+    const d = document.createElement('div');
+    d.id = 'monthly-review-modal';
+    d.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px';
+    document.body.appendChild(d);
+    return d;
+  })();
+  host.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;max-width:480px;width:100%;padding:20px;max-height:86vh;overflow:auto">
+      <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;margin-bottom:4px">📊 Итоги месяца</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px">${esc(reviewMonthLabel(r.ym))} закрыт. Вот как прошло.</div>
+      ${renderMonthlyReviewBody(r)}
+      <button class="btn btn-primary" style="width:100%;margin-top:16px" onclick="closeMonthlyReviewModal()">Понятно</button>
+    </div>`;
+}
+function closeMonthlyReviewModal() {
+  const host = document.getElementById('monthly-review-modal');
+  if (host) host.remove();
+}
+
 function renderAll() {
   renderDashboard();
   renderIncome();
@@ -8580,6 +8839,7 @@ function renderAll() {
   renderGoals();
   renderHabits();
   renderTips();
+  renderReviews();
   refreshExpenseBalanceSelect();
   refreshIncomeBalanceSelect();
   refreshIncomeEarmarkSelect();
@@ -9661,6 +9921,10 @@ renderAll();
 setTimeout(() => {
   try { showPendingEventsPrompt(); } catch (e) { console.error(e); }
 }, 300);
+// Итог прошлого месяца — один раз при первом открытии в новом месяце (поверх pending, если совпало).
+setTimeout(() => {
+  try { maybeShowMonthlyReview(); } catch (e) { console.error(e); }
+}, 700);
 
 // ===== Pending events UI (incomes + deductions) =====
 // Обратная совместимость — если где-то остался старый вызов
