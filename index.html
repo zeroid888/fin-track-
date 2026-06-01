@@ -2423,6 +2423,7 @@ button:focus, a:focus { outline: none; }
     <button class="btn btn-ghost" onclick="importText()">📋 Разобрать текст</button>
   </div>
 
+  <div id="import-undo"></div>
   <div id="import-preview"></div>
 </div>
 
@@ -7481,7 +7482,7 @@ const CATEGORY_RULES = [
   // ⚡️ Power-banks
   { cat: '⚡️ Зарядка', keywords: ['бери заряд', 'beri zaryad', 'berizaryad'] },
   // 💸 Переводы — общая категория для платежей людям/юр.лицам, не попавших в специфичные правила выше
-  { cat: '💸 Переводы', keywords: ['внешний перевод', 'перевод по номеру телефона', 'перевод по номеру карты', 'сбп перевод', 'система быстрых платежей', 'c2a', 'yandexbank_c2a', 'mbank.mts', 'перевод юридическому', 'перевод физическому'] },
+  { cat: '💸 Переводы', keywords: ['внешний перевод', 'банковский перевод', 'перевод по номеру телефона', 'перевод по номеру карты', 'сбп перевод', 'система быстрых платежей', 'c2a', 'yandexbank_c2a', 'mbank.mts', 'перевод юридическому', 'перевод физическому'] },
   // 💼 Бизнес — комиссии и обслуживание (отдельно от потребительских расходов)
   { cat: '💼 Бизнес', keywords: ['комиссия за операц', 'плата за программу страхов', 'проценты по кредит', 'плата за обслуж'] },
   // 🏦 Кредиты — обслуживание кредита (амортизация + досрочное погашение). Имя категории
@@ -7510,8 +7511,11 @@ function autoCategorize(desc) {
 
 // Временный буфер распознанных транзакций — ждёт подтверждения перед сохранением
 let importBuffer = [];
+let importStatementBalance = null;
+let importUndoArmed = false;  // снят ли снимок отмены для текущего сеанса импорта  // {amount,date} из «Сумма доступного остатка» (parsePDF) — для обновления баланса
 
 async function importFile() {
+  importStatementBalance = null;
   const f = document.getElementById('imp-file').files[0];
   if (!f) { alert('Выбери файл выписки'); return; }
   const ext = f.name.split('.').pop().toLowerCase();
@@ -7641,6 +7645,7 @@ async function parsePDF(buf, bank) {
       alert('Не удалось найти операции. Возможно это скан-изображение PDF — экспортируй в CSV/Excel из интернет-банка.');
       return;
     }
+    importStatementBalance = (effBank === 'tinkoff') ? parseTinkoffBalance(fullText) : null;
     previewImport(rows);
   } catch (e) {
     console.error(e);
@@ -7648,30 +7653,94 @@ async function parsePDF(buf, bank) {
   }
 }
 
-// Специализированный парсер выписки Т-Банка (Тинькофф)
-// Строка операции: DD.MM.YYYY DD.MM.YYYY -X XXX.XX ₽ -X XXX.XX ₽ Описание [4циф]
+// Специализированный парсер выписки Т-Банка (Тинькофф).
+// AUDIT [FIXED 2026-06-01] | Раньше парсер ждал ВСЮ операцию в одной строке и на реальной
+// «Справке о движении средств» (PDF) ломался: Т-Банк раскидывает дату/время по двум строкам,
+// описание переносит, а номер карты выносит отдельной строкой. Итог — описание обрезалось до
+// первой строки («Оплата в KROSHKI» вместо «KROSHKI PEKARNYA», пустое «Оплата в» вместо
+// «YANDEX*SCOOTERS»), а приклеенная без пробела карта (kinoflex…PERM7557) терялась. Теперь
+// операция собирается из ГЛАВНОЙ строки + всех строк-продолжений до следующей операции/служебной
+// строки. Проверено на реальной выписке: 48 операций, сумма сходится с контрольной (152 673.86).
+//
+// Раскладка одной операции в извлечённом тексте (после Y-группировки в parsePDF):
+//   ГЛАВНАЯ:   DD.MM.YYYY DD.MM.YYYY -сумма ₽ -сумма ₽ <начало описания> [карта]
+//   ВРЕМЯ:     HH:MM HH:MM <перенос описания>
+//   ПЕРЕНОС:   <ещё перенос: контрагент, телефон, № счёта, город RUS>
 function parseTinkoff(text) {
   const rows = [];
   const lines = text.split(/\r?\n/);
-  const re = /^\s*(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+([-+][\d\s\u00A0]+[.,]\d{2})\s*₽\s+([-+][\d\s\u00A0]+[.,]\d{2})\s*₽\s+(.+?)(?:\s+(\d{4}))?\s*$/;
-  for (const ln of lines) {
-    const m = ln.match(re);
-    if (!m) continue;
-    const date = normalizeDate(m[1]);
-    const amt = parseMoney(m[3]);
-    if (!date || isNaN(amt) || amt === 0) continue;
-    let desc = (m[5] || '').trim().replace(/\s{2,}/g, ' ');
-    desc = desc.replace(/\s+(RUS|g\.?\s*Moskva.*|G\.?\s*MOSKVA.*|MOSCOW\s+RUS.*|Odincovo\s+RUS.*|Odinczovo\s+RUS.*|Zareche\s+RUS.*)$/i, '').trim();
-    if (!desc) desc = 'Операция';
+  // Главная строка: две даты, две суммы в ₽, дальше — начало описания (+ возможно карта в хвосте).
+  const rePrimary = /^\s*(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+([-+][\d\s ]+[.,]\d{2})\s*₽\s+([-+][\d\s ]+[.,]\d{2})\s*₽\s*(.*)$/;
+  // Строка времени (операции/списания): несёт первый перенос описания после двух HH:MM.
+  const reTime = /^\s*\d{2}:\d{2}\s+\d{2}:\d{2}\s*(.*)$/;
+  // Служебные строки (шапка таблицы, подвал лицензии, № страницы, реквизиты, итоги). Они разрывают
+  // операции на стыке страниц и не должны попадать в описание → на такой строке операция закрывается.
+  const reNoise = /(^Дата и время|^операции\s|^Номер$|^карты$|^\d{1,3}$|АО «ТБанк»|^БИК |универсальная лицензия|Движение средств за период|^Пополнения:|^Расходы:|С уважением|Руководитель|Справка о движении|^АКЦИОНЕРНОЕ|^РОССИЯ,|^ТЕЛ\.|^Чумак|^Адрес места|^О продукте|^Дата заключения|^Номер договора|^Номер лицевого|^Сумма доступного|TBANK\.RU|^Исх\.)/;
+
+  let cur = null;
+  const flush = () => {
+    if (!cur) return;
+    const desc = cleanTinkoffDesc(cur.parts.join(' '));
     rows.push({
-      date, desc,
-      amount: Math.abs(amt),
-      type: amt > 0 ? 'income' : 'expense',
-      cat: amt < 0 ? autoCategorize(desc) : null,
+      date: cur.date, desc,
+      amount: cur.amount,
+      type: cur.type,
+      cat: cur.type === 'expense' ? autoCategorize(desc) : null,
       selected: true
     });
+    cur = null;
+  };
+
+  for (const ln of lines) {
+    const p = ln.match(rePrimary);
+    if (p) {
+      flush();
+      const date = normalizeDate(p[1]);
+      // p[4] = «сумма операции в валюте карты» — что реально списалось со счёта в ₽
+      // (для FX-операции «валюта операции» в p[3] была бы в инвалюте; трекер считает в ₽).
+      const amt = parseMoney(p[4]);
+      if (!date || isNaN(amt) || amt === 0) { cur = null; continue; }
+      const rem = p[5] || '';
+      // Карта — последние 4 цифры в самом конце строки, даже если приклеены к слову (PERM7557).
+      // Цифры в середине (GORZDRAV_6467) не трогаем: берём только хвост через `$`.
+      const cardM = rem.match(/(\d{4})\s*$/);
+      const descStart = cardM ? rem.slice(0, cardM.index) : rem;
+      cur = {
+        date,
+        amount: Math.abs(amt),
+        type: amt > 0 ? 'income' : 'expense',
+        parts: [descStart]
+      };
+      continue;
+    }
+    if (!cur) continue;
+    if (reNoise.test(ln.trim())) { flush(); continue; } // разрыв страницы — операция закончилась
+    const t = ln.match(reTime);
+    if (t) { if (t[1] && t[1].trim()) cur.parts.push(t[1].trim()); continue; }
+    cur.parts.push(ln.trim()); // чистый перенос описания
   }
+  flush();
   return rows;
+}
+
+// Чистка собранного описания операции Т-Банка: схлопываем пробелы и срезаем гео-хвост
+// «[g./G город] RUS|Россия» (Zareche RUS, g. Moskva RUS, Одинцово Россия). Срезаем РОВНО один
+// city-токен перед RUS, чтобы не съесть имя мерчанта (MARAN ZARECHE остаётся MARAN ZARECHE).
+function cleanTinkoffDesc(d) {
+  let s = (d || '').replace(/\s{2,}/g, ' ').trim();
+  s = s.replace(/\s+(?:g\.|г\.|G)?\s*[A-Za-zА-Яа-я][\w.\-]*\s+(?:RUS|Россия)\s*$/i, '').trim();
+  s = s.replace(/\s+(?:RUS|Россия)\s*$/i, '').trim();
+  return s || 'Операция';
+}
+
+// Извлекает «Сумма доступного остатка на DD.MM.YYYY: X ₽» из выписки Т-Банка.
+// Возвращает { amount, date } | null. Используется в превью импорта для обновления баланса.
+function parseTinkoffBalance(text) {
+  const m = (text || '').match(/Сумма\s+доступного\s+остатка\s+на\s+(\d{2}\.\d{2}\.\d{4})\s*:?\s*([\d\s]+[.,]\d{2})\s*₽/i);
+  if (!m) return null;
+  const amount = parseMoney(m[2]);
+  if (isNaN(amount)) return null;
+  return { amount, date: normalizeDate(m[1]) };
 }
 
 // Универсальный парсер табличных данных: ищет колонки дата/описание/сумма
@@ -7935,6 +8004,7 @@ function buildBehaviorTips(analytics, monthCount, totalIncMonth) {
 
 function previewImport(rows) {
   importBuffer = rows;
+  importUndoArmed = false;
   const box = document.getElementById('import-preview');
   if (!rows || rows.length === 0) {
     box.innerHTML = '<div class="alert danger">Не удалось найти операции. Проверь формат или вставь данные вручную.</div>';
@@ -8118,6 +8188,27 @@ function renderImportPreview(rows, byCat, sortedCats, totalInc) {
     </div>`;
   }
 
+  // ===== 5.5. Блок: остаток по выписке → обновление баланса =====
+  // importStatementBalance заполняется в parsePDF из «Сумма доступного остатка». Инвариант #4:
+  // баланс меняется только явным действием с подтверждением → кнопка + confirm, не молча.
+  if (importStatementBalance && Array.isArray(state.balances) && state.balances.length) {
+    const sb = importStatementBalance;
+    const cashRub = (state.balances || []).filter(b => b.kind !== 'credit-card' && (b.currency || 'RUB') === 'RUB');
+    const list = cashRub.length ? cashRub : (state.balances || []);
+    const guess = list.find(b => /тинь|т-?банк|tinkoff|tbank/i.test(b.name || ''));
+    const sbHuman = sb.date ? sb.date.split('-').reverse().join('.') : '';
+    html += `<div class="card"><div class="card-title">💰 Остаток по выписке</div>
+      <div class="alert">Доступный остаток${sbHuman ? ' на <strong>' + sbHuman + '</strong>' : ''}: <strong>${fmt(sb.amount)}</strong>. Можно перезаписать им баланс — выбери какой и нажми «Обновить».</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <select id="imp-balance-target" style="flex:1;min-width:160px;padding:9px 10px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit">
+          ${list.map(b => `<option value="${esc(b.id)}"${guess && b.id === guess.id ? ' selected' : ''}>${esc((b.emoji || '') + ' ' + b.name)} — сейчас ${fmt(b.amount)}</option>`).join('')}
+        </select>
+        <button class="btn btn-primary" style="margin:0" onclick="applyStatementBalance()">Обновить баланс</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">Перезапишет сумму выбранного баланса на остаток из выписки. На операции не влияет — только баланс.</div>
+    </div>`;
+  }
+
   // ===== 6. Блок: применение =====
   // ПЕРВИЧНЫЙ путь — back-fill пропущенных дней в state.transactions. Доходы и месячный бюджет
   // (state.incomes / state.expenses) пользователь ведёт сам, выписка их НЕ перезаписывает.
@@ -8191,8 +8282,72 @@ function toggleImportInc() {
   importInclInc = !importInclInc;
 }
 
+// Перезаписывает amount выбранного баланса остатком из выписки (importStatementBalance).
+// Инвариант #4: только по явному клику + confirm. На транзакции не влияет.
+function applyStatementBalance() {
+  const sb = importStatementBalance;
+  if (!sb) { alert('Остаток из выписки не найден'); return; }
+  const sel = document.getElementById('imp-balance-target');
+  if (!sel || !sel.value) { alert('Выбери баланс'); return; }
+  const b = (state.balances || []).find(x => x.id === sel.value);
+  if (!b) { alert('Баланс не найден'); return; }
+  if (b.kind === 'credit-card') { alert('Это кредитная карта — остаток с дебетовой выписки сюда не применяется.'); return; }
+  const sbHuman = sb.date ? sb.date.split('-').reverse().join('.') : '';
+  if (!confirm(`Перезаписать баланс «${b.name}»: ${fmt(b.amount)} → ${fmt(sb.amount)}${sbHuman ? ' (остаток на ' + sbHuman + ')' : ''}?`)) return;
+  if (!importUndoArmed) { captureImportUndo('остаток'); importUndoArmed = true; }
+  b.amount = sb.amount;
+  save();
+  renderImportUndo();
+  renderAll();
+  alert(`Баланс «${b.name}» обновлён: ${fmt(sb.amount)}.`);
+}
+
+// ===== Отмена импорта =====
+// Перед первой apply-операцией импорта снимаем полный снимок state в отдельный ключ localStorage.
+// «Отменить последний импорт» восстанавливает его (вернуть как было). Один уровень отмены.
+function captureImportUndo(label) {
+  try {
+    localStorage.setItem('myfinance_v2_import_undo', JSON.stringify({ ts: Date.now(), label: label || '', state: state }));
+  } catch (e) { console.warn('Не удалось снять снимок для отмены импорта:', e); }
+}
+
+// Рисует кнопку отмены на вкладке «Импорт» (#import-undo), если снимок есть.
+function renderImportUndo() {
+  const el = document.getElementById('import-undo');
+  if (!el) return;
+  let snap = null;
+  try { snap = JSON.parse(localStorage.getItem('myfinance_v2_import_undo') || 'null'); } catch (e) { snap = null; }
+  if (!snap || !snap.state) { el.innerHTML = ''; return; }
+  let human = '';
+  try { human = snap.ts ? new Date(snap.ts).toLocaleString('ru-RU') : ''; } catch (e) {}
+  el.innerHTML = `<div class="card" style="border:1px solid var(--accent2)"><div class="card-title">↩️ Отмена импорта</div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:10px;line-height:1.5">Доступен откат к состоянию до последнего импорта${human ? ' (снимок от <strong>' + esc(human) + '</strong>)' : ''}. Вернёт добавленные операции и изменённый остаток баланса как было.</div>
+    <button class="btn btn-ghost" onclick="undoLastImport()">↩️ Отменить последний импорт</button>
+  </div>`;
+}
+
+// Восстанавливает state из снимка. Мутируем существующий объект (на него ссылаются замыкания), не переприсваиваем.
+function undoLastImport() {
+  let snap = null;
+  try { snap = JSON.parse(localStorage.getItem('myfinance_v2_import_undo') || 'null'); } catch (e) { snap = null; }
+  if (!snap || !snap.state) { alert('Нечего отменять — снимок импорта не найден.'); return; }
+  let human = '';
+  try { human = snap.ts ? new Date(snap.ts).toLocaleString('ru-RU') : ''; } catch (e) {}
+  if (!confirm(`Откатить последний импорт${human ? ' (снимок от ' + human + ')' : ''}?\n\nВсё, что этот импорт добавил/изменил (операции и остаток баланса), вернётся как было.`)) return;
+  const restored = snap.state;
+  Object.keys(state).forEach(k => { if (!(k in restored)) delete state[k]; });
+  Object.keys(restored).forEach(k => { state[k] = restored[k]; });
+  save();
+  localStorage.removeItem('myfinance_v2_import_undo');
+  importUndoArmed = false;
+  renderImportUndo();
+  renderAll();
+  alert('Импорт отменён — данные восстановлены.');
+}
+
 function cancelImport() {
   importBuffer = [];
+  importStatementBalance = null;
   importSelected = {};
   importContragentChoices = {};
   document.getElementById('import-preview').innerHTML = '';
@@ -8264,6 +8419,7 @@ function applyImportAsMonthly() {
   const mc = period.monthCount || 1;
 
   // Удаляем старые автодобавленные записи из выписки (чтобы не плодились при повторном импорте)
+  if (!importUndoArmed) { captureImportUndo('средние'); importUndoArmed = true; }
   state.expenses = state.expenses.filter(e => !(e.name || '').endsWith('(из выписки)'));
   state.incomes = state.incomes.filter(i => !(i.name || '').endsWith('(из выписки)'));
 
@@ -8347,6 +8503,7 @@ function applyImportAsHistory() {
   });
 
   let addedExp = 0, addedInc = 0, skippedDupFull = 0, skippedDupSmart = 0, skippedTransfers = 0, skippedByDate = 0, skippedIncomes = 0;
+  if (!importUndoArmed) { captureImportUndo('история'); importUndoArmed = true; }
 
   importBuffer.forEach(r => {
     // 1) Фильтр по дате
@@ -8408,6 +8565,7 @@ function showPageDirect(name) {
   const idx = { dashboard:0, income:1, expenses:2, credits:3, balances:4, goals:5, habits:6, import:7, tips:8 }[name];
   if (idx !== undefined && tabs[idx]) tabs[idx].classList.add('active');
   renderAll();
+  if (name === 'import') renderImportUndo();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
