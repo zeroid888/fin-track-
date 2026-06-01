@@ -2279,6 +2279,22 @@ button:focus, a:focus { outline: none; }
       Курсы обновляются вручную. Периодически проверяй их — например, через Google «курс доллара» или курс USDT на Binance.
     </div>
   </div>
+
+  <div class="card">
+    <div class="card-title">Бюджет на жизнь</div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label>Подушка, ₽ (не трогаем)</label>
+        <input id="budget-cushion" type="number" step="1000" placeholder="0">
+      </div>
+      <div class="form-group">
+        <label>Целевой средний чек, ₽/день</label>
+        <input id="budget-avgcheck" type="number" step="100" placeholder="к чему стремишься">
+      </div>
+    </div>
+    <button class="btn btn-ghost" onclick="saveBudgetSettings()">💾 Сохранить</button>
+    <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.5" id="budget-settings-hint"></div>
+  </div>
 </div>
 
 <!-- GOALS -->
@@ -2517,7 +2533,9 @@ let state = {
   // Долгосрочно правильно — fetch при первом запуске + индикатор «курс не обновлялся N дней».
   rates: { USD: 75, USDT: 75 },
   lastImport: null,
-  userRules: []     // правила автокатегоризации, заданные пользователем через UI «Переразметить контрагентов». { key, cat, createdAt }
+  userRules: [],    // правила автокатегоризации, заданные пользователем через UI «Переразметить контрагентов». { key, cat, createdAt }
+  cushionTarget: 0,   // ₽ подушки, которую НЕ трогаем при расчёте дневного бюджета (0 = выкл)
+  avgCheckTarget: null // ₽/день — ручной ориентир «средний чек на жизнь»; null = считать из истории транзакций
 };
 
 // AUDIT P0-5 [FIXED 2026-05-14] | save() обёрнут в try/catch + блокировка через __SAVE_BLOCKED__,
@@ -2549,7 +2567,7 @@ function load() {
       // 1. Берём всё, что было сохранено, поверх дефолтов
       // AUDIT P0-8 [FIXED 2026-05-14] | Whitelist разрешённых ключей — мусор/фантомы из бэкапа
       // в state не попадают. При будущем переименовании поля добавь шаг миграции ниже.
-      const ALLOWED_KEYS = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances', 'rates', 'lastImport', 'userRules'];
+      const ALLOWED_KEYS = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances', 'rates', 'lastImport', 'userRules', 'cushionTarget', 'avgCheckTarget'];
       ALLOWED_KEYS.forEach(k => {
         if (parsed[k] !== undefined) state[k] = parsed[k];
       });
@@ -2571,6 +2589,11 @@ function load() {
         const p = parseFloat(v); // парсим строку
         state.rates[cur] = (isFinite(p) && p > 0) ? p : 75;
       });
+
+      // Бюджет на жизнь: подушка (не трогаем) и ручной ориентир среднего чека.
+      // cushionTarget — число ≥ 0 (0 = выкл). avgCheckTarget — положительное число или null (null = считать из истории).
+      if (typeof state.cushionTarget !== 'number' || !isFinite(state.cushionTarget) || state.cushionTarget < 0) state.cushionTarget = 0;
+      if (state.avgCheckTarget != null && (typeof state.avgCheckTarget !== 'number' || !isFinite(state.avgCheckTarget) || state.avgCheckTarget <= 0)) state.avgCheckTarget = null;
 
       // 3. Добавляем новые поля старым записям (backward-compat)
       state.incomes.forEach(i => {
@@ -3502,8 +3525,64 @@ function getCashflowSnapshot() {
     reserveTotal
   };
 }
+// Картина «сколько можно тратить в день» — по РЕАЛЬНЫМ деньгам на счетах (выбор Daniel 2026-06-01:
+// база = баланс счетов, бережём накопления). Заменяет старый smartDaily, который схлопывался в 0,
+// когда касса до ЗП уходила в минус (Путь B бага «0₽ надолго»).
+//   Доступно = деньги на денежных счетах + ЗП, что ещё придёт до конца месяца
+//            − аренда/кредиты до конца месяца − взносы в цели (прорейт) − подушка
+//   Можно в день = max(0, Доступно) ÷ дней до конца месяца
+// Дневной капающий доход (Bitzone/тимлид) НЕ берём как гарантированный — только то, что уже на счетах.
+function getSpendingPicture() {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const todayStr = todayIso();
+  const daysLeft = Math.max(1, daysLeftInMonth());
+  const dim = Math.max(1, daysInMonth());
+  const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+
+  // 1) Деньги на денежных счетах (кредитки не в счёт), в ₽
+  const cashNow = (state.balances || []).filter(b => !isCreditCard(b))
+    .reduce((s, b) => s + toRub(b.amount, b.currency), 0);
+
+  // 2) Стабильный доход (только ЗП: monthly/semimonthly/yearly), который ЕЩЁ придёт до конца месяца
+  const stableIncomeAhead = allIncomeEventsForMonth(today)
+    .filter(e => ['monthly', 'semimonthly', 'yearly'].includes(e.freq) && e.date > todayStr)
+    .reduce((s, e) => s + e.amount, 0);
+
+  // 3) Обязательные датированные списания (аренда + кредиты), что ещё спишутся до конца месяца.
+  // Считаем СТРОГО с завтра: сегодняшнее списание либо уже ушло (уменьшило cashNow), либо
+  // всплывёт в модалке pending — иначе в день платежа оно вычиталось бы дважды. Симметрично
+  // с доходом выше (его тоже берём только date > сегодня).
+  const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+  const debitsAhead = commitmentsBetween(tomorrow, monthEnd);
+
+  // 4) Взносы в активные цели за остаток месяца (прорейт по оставшимся дням)
+  const goalsAhead = totalGoalsMonthly() * (daysLeft / dim);
+
+  // 5) Подушка — не трогаем
+  const cushion = (typeof state.cushionTarget === 'number' && state.cushionTarget > 0) ? state.cushionTarget : 0;
+
+  const spendable = cashNow + stableIncomeAhead - debitsAhead - goalsAhead - cushion;
+  const breakEvenDaily = Math.max(0, spendable) / daysLeft;
+
+  // Два РАЗНЫХ средних чека (Daniel 2026-06-01): «факт» — что реально тратится (из истории
+  // транзакций); «цель» — к чему стремится (ручное avgCheckTarget, может быть null).
+  const avgFact = averageDailyLifeSpend();
+  const avgTarget = (typeof state.avgCheckTarget === 'number' && state.avgCheckTarget > 0) ? state.avgCheckTarget : null;
+
+  // Прогноз строим от ФАКТА (реалистичный темп): сколько отложится (+) / не хватит (−) к концу месяца.
+  // targetDelta — то же для цели (влезает ли цель в бюджет).
+  const projDeltaFact = avgFact > 0 ? (breakEvenDaily - avgFact) * daysLeft : null;
+  const targetDelta = avgTarget != null ? (breakEvenDaily - avgTarget) * daysLeft : null;
+
+  return {
+    cashNow, stableIncomeAhead, debitsAhead, goalsAhead, cushion,
+    spendable, breakEvenDaily, avgFact, avgTarget, projDeltaFact, targetDelta,
+    daysLeft, dim
+  };
+}
 function dailyBudget() {
-  return getCashflowSnapshot().smartDaily;
+  // Одно число везде (дашборд, спарклайн, пейсинг): дневной бюджет «по счетам, бережём накопления».
+  return getSpendingPicture().breakEvenDaily;
 }
 
 // ===== INCOME =====
@@ -4807,6 +4886,17 @@ function editBalanceAmount(id) {
   save(); renderAll();
 }
 
+// Настройки «Бюджет на жизнь»: подушка (₽, не трогаем) + ручной средний чек (₽/день).
+function saveBudgetSettings() {
+  const c = parseAmount((document.getElementById('budget-cushion') || {}).value);
+  const a = parseAmount((document.getElementById('budget-avgcheck') || {}).value);
+  state.cushionTarget = (isFinite(c) && c > 0) ? c : 0;
+  state.avgCheckTarget = (isFinite(a) && a > 0) ? a : null;
+  save();
+  renderAll();
+  toast('💾 Бюджет на жизнь обновлён');
+}
+
 function saveRates() {
   const u = parseAmount(document.getElementById('rate-usd').value);
   const t = parseAmount(document.getElementById('rate-usdt').value);
@@ -5013,6 +5103,17 @@ function renderBalances() {
   const rT = document.getElementById('rate-usdt');
   if (rU && document.activeElement !== rU) rU.value = state.rates.USD;
   if (rT && document.activeElement !== rT) rT.value = state.rates.USDT;
+
+  // Заполняем «Бюджет на жизнь» (не перетираем, пока пользователь печатает)
+  const cushEl = document.getElementById('budget-cushion');
+  const avgEl = document.getElementById('budget-avgcheck');
+  if (cushEl && document.activeElement !== cushEl) cushEl.value = (state.cushionTarget > 0) ? state.cushionTarget : '';
+  if (avgEl && document.activeElement !== avgEl) avgEl.value = (typeof state.avgCheckTarget === 'number' && state.avgCheckTarget > 0) ? state.avgCheckTarget : '';
+  const bHint = document.getElementById('budget-settings-hint');
+  if (bHint) {
+    const suggested = (totalExpenses() + totalCredits()) * 3;
+    bHint.innerHTML = `Подушка — сумма, которую не трогаем при расчёте дневного бюджета. Норма ≈3 мес обязательных = <strong>${fmt(suggested)}</strong>. Целевой средний чек — к чему стремишься (₽/день). Факт (сколько реально тратишь, сейчас ${fmt(averageDailyLifeSpend())}/день) считается из истории трат и показывается на дашборде отдельно.`;
+  }
 
   if (!state.balances || state.balances.length === 0) {
     list.innerHTML = '<div class="empty-state"><div class="empty-icon">💼</div>Балансы не добавлены<br><span style="font-size:12px">Добавь карты, криптокошельки, наличные</span></div>';
@@ -5641,6 +5742,26 @@ function renderLastEntryHint() {
   el.style.display = 'block';
 }
 
+// Мини-формула под дневным бюджетом: из чего собралось «доступно до конца месяца».
+function fillSpendingFormula(pic, formula) {
+  if (!formula) return;
+  if (!pic || (pic.cashNow === 0 && pic.stableIncomeAhead === 0)) {
+    formula.innerHTML = ''; formula.classList.remove('danger'); return;
+  }
+  const rows = [
+    `<div class="df-row"><span>Деньги на счетах</span><strong>${fmt(pic.cashNow)}</strong></div>`,
+    pic.stableIncomeAhead > 0 ? `<div class="df-row"><span>+ ЗП ещё придёт</span><span>${fmt(pic.stableIncomeAhead)}</span></div>` : '',
+    pic.debitsAhead > 0 ? `<div class="df-row"><span>− Аренда / кредиты до конца мес</span><span>${fmt(pic.debitsAhead)}</span></div>` : '',
+    pic.goalsAhead > 0 ? `<div class="df-row"><span>− Взносы в цели (остаток мес)</span><span>${fmt(pic.goalsAhead)}</span></div>` : '',
+    pic.cushion > 0 ? `<div class="df-row"><span>− Подушка (не трогаем)</span><span>${fmt(pic.cushion)}</span></div>` : '',
+    `<div class="df-row total"><span>${pic.spendable < 0 ? 'В обрез' : 'Доступно до конца месяца'}</span><strong style="color:${pic.spendable < 0 ? 'var(--accent2)' : 'var(--good)'}">${pic.spendable < 0 ? '−' + fmt(-pic.spendable) : fmt(pic.spendable)}</strong></div>`,
+  ].filter(Boolean).join('');
+  const dailyLine = pic.breakEvenDaily > 0
+    ? `<div class="df-row total"><span>÷ ${pic.daysLeft} дн. до конца месяца</span><strong>≈ ${fmt(pic.breakEvenDaily)}/день</strong></div>`
+    : `<div class="df-row total"><span>На жизнь в этом месяце</span><strong style="color:var(--accent2)">0 ₽/день</strong></div>`;
+  formula.innerHTML = `<span class="df-title">Откуда дневной бюджет</span>${rows}${dailyLine}`;
+  formula.classList.toggle('danger', pic.spendable < 0);
+}
 function renderDashboard() {
   renderHeaderDate();
   renderLastEntryHint();
@@ -5652,7 +5773,6 @@ function renderDashboard() {
   const cr = totalCredits();
   const fr = free();
   const goalsMonthly = totalGoalsMonthly();
-  const daily = dailyBudget();
   const days = daysInMonth();
   const txExp = totalTransactionExpenses();
   const txIncome = totalTransactionIncome();
@@ -5725,86 +5845,66 @@ function renderDashboard() {
     }
   } catch (e) { /* ignore */ }
 
-  // Сколько уже потрачено сегодня (разовые траты)
+  // ── Карточка «Сколько можно тратить» — по реальным деньгам на счетах (выбор Daniel 2026-06-01) ──
+  const pic = getSpendingPicture();
   const todayKey = todayIso();
   const spentToday = state.transactions
-    .filter(t => t.date === todayKey && t.type !== 'income')
+    .filter(t => t.date === todayKey && t.type !== 'income' && !isTransferTx(t))
     .reduce((s, t) => s + t.amount, 0);
-  const remainingToday = daily > 0 ? Math.max(0, daily - spentToday) : 0;
+  const breakEven = pic.breakEvenDaily;
+  const remainingToday = Math.max(0, breakEven - spentToday);
 
-  // Главное число — «сколько ещё можно потратить СЕГОДНЯ», чтобы оно менялось при каждой трате
-  document.getElementById('dash-daily').textContent = daily > 0
-    ? fmt(remainingToday)
-    : ((snapshot.monthlyFree || 0) < 0 ? '—' : '0 ₽');
-  document.getElementById('dash-daily-max').textContent = fmt(snapshot.leftBeforeNext);
-
-  const pct = inc > 0 ? Math.min(100, Math.max(0, (snapshot.leftBeforeNext / inc) * 100)) : 0;
-  document.getElementById('dash-daily-bar').style.width = pct + '%';
-
-  // Разбивка «на что уходит каждый день»
-  const habitsDaily = totalHabitsDaily();
-  const goalsDaily = snapshot.goalsMonthlyContrib / 30;
-  const breakdownParts = [];
-  if (goalsDaily > 0) breakdownParts.push(`${fmt(goalsDaily)} на цели`);
-  if (habitsDaily > 0) breakdownParts.push(`${fmt(habitsDaily)} на привычки`);
-  const breakdownSuffix = breakdownParts.length ? ` · сверху ${breakdownParts.join(' + ')}` : '';
-
+  const dailyEl = document.getElementById('dash-daily');
   const sub = document.getElementById('dash-daily-sub');
-  const monthlyFree = snapshot.monthlyFree;
   const dailyHeader = document.getElementById('dash-daily-header');
   const formula = document.getElementById('dash-daily-formula');
+  const barEl = document.getElementById('dash-daily-bar');
 
-  // Заполнение мини-формулы под прогресс-баром (общее для всех веток ниже)
-  const fillFormula = () => {
-    if (!formula) return;
-    if (inc === 0) { formula.innerHTML = ''; formula.classList.remove('danger'); return; }
-    const goalsMonth = snapshot.goalsMonthlyContrib || 0;
-    const habitsMonth = snapshot.habitsMonthly || 0;
-    const rows = [
-      `<div class="df-row"><span>Доход / мес</span><strong>${fmt(inc)}</strong></div>`,
-      `<div class="df-row"><span>− Обязательные</span><span>${fmt(exp)}</span></div>`,
-      cr > 0 ? `<div class="df-row"><span>− Кредиты</span><span>${fmt(cr)}</span></div>` : '',
-      goalsMonth > 0 ? `<div class="df-row"><span>− Цели</span><span>${fmt(goalsMonth)}</span></div>` : '',
-      habitsMonth > 0 ? `<div class="df-row"><span>− Привычки</span><span>${fmt(habitsMonth)}</span></div>` : '',
-      `<div class="df-row total"><span>${monthlyFree < 0 ? 'Дефицит' : 'Свободно на жизнь / мес'}</span><strong style="color:${monthlyFree < 0 ? 'var(--accent2)' : 'var(--good)'}">${monthlyFree < 0 ? '−' + fmt(-monthlyFree) : fmt(monthlyFree)}</strong></div>`,
-    ].filter(Boolean).join('');
-    const denomDays = Math.max(1, daysLeftInMonth());
-    const dailyLine = monthlyFree > 0
-      ? `<div class="df-row total"><span>÷ ${denomDays} дн. до конца месяца</span><strong>≈ ${fmt(monthlyFree / denomDays)}/день</strong></div>`
-      : `<div class="df-row total"><span>На жизнь в этом месяце</span><strong style="color:var(--accent2)">0 ₽/день</strong></div>`;
-    formula.innerHTML = `<span class="df-title">Откуда дневной бюджет</span>${rows}${dailyLine}`;
-    formula.classList.toggle('danger', monthlyFree < 0);
-  };
-  fillFormula();
+  fillSpendingFormula(pic, formula);
+  document.getElementById('dash-daily-max').textContent =
+    `доступно до конца месяца ${pic.spendable < 0 ? '−' + fmt(-pic.spendable) : fmt(pic.spendable)}`;
 
-  if (inc === 0) {
-    sub.textContent = 'Добавь доходы для расчёта';
-  } else if (monthlyFree < 0) {
-    // Красная ситуация: обязательства + цели + привычки > дохода
-    const deficit = -monthlyFree;
-    sub.innerHTML = `⛔ Цели и привычки сейчас «съедают» доход на <strong>${fmt(deficit)}</strong> сверх обязательных. Это значит: либо сократить взносы на цели/привычки (вкладки «Цели» и «Привычки»), либо нарастить доход. До этого момента дневной лимит = 0.`;
-  } else if (snapshot.nextPayDate && snapshot.budgetDays >= 3 && snapshot.rawDaily <= snapshot.sustainableDaily * 2) {
-    // В обычном режиме — показываем, сколько можно до выплаты
-    const extra = snapshot.scheduledDebits > 0 ? ` · до ЗП спишется ещё ${fmt(snapshot.scheduledDebits)}` : '';
-    const spentLine = spentToday > 0 ? ` · сегодня уже потрачено ${fmt(spentToday)}` : '';
-    sub.textContent = `Лимит на день ≈ ${fmt(daily)}${spentLine}. До ${formatShortDate(snapshot.nextPayDate)} это про ${extra}${breakdownSuffix}`.trim();
-  } else if (snapshot.nextPayDate) {
-    // Режим «выплата скоро» — считаем от месячной нормы
-    const spentLine = spentToday > 0 ? ` · сегодня уже потрачено ${fmt(spentToday)}` : '';
-    sub.textContent = `Выплата близко — устойчивая норма ${fmt(daily)}/день${spentLine}${breakdownSuffix}`;
-  } else if (daily > 0) {
-    const spentLine = spentToday > 0 ? ` · сегодня уже потрачено ${fmt(spentToday)}` : '';
-    sub.textContent = `Свободных ${fmt(fr)} на ${daysLeftInMonth()} дней до конца месяца${spentLine}${breakdownSuffix}`;
-  } else {
-    sub.textContent = '⚠️ Лимит уже съеден — до следующей выплаты лучше только обязательные траты';
-  }
-  // Подпись к главной цифре
-  if (dailyHeader) {
-    if (daily > 0) {
-      dailyHeader.textContent = spentToday > 0 ? `осталось сегодня из ${fmt(daily)}` : 'можно потратить сегодня';
-    } else {
-      dailyHeader.textContent = 'дневной бюджет';
+  if (inc === 0 && pic.cashNow === 0) {
+    dailyEl.textContent = '—';
+    dailyHeader.textContent = 'дневной бюджет';
+    sub.textContent = 'Добавь доходы, счета и расходы для расчёта';
+    barEl.style.width = '0%';
+  } else if (breakEven > 0) {
+    // Прогресс-бар = сколько от дневного уже потрачено сегодня
+    barEl.style.width = Math.min(100, (spentToday / breakEven) * 100) + '%';
+    dailyEl.textContent = spentToday > 0 ? fmt(remainingToday) : fmt(breakEven);
+    dailyHeader.textContent = spentToday > 0 ? `осталось сегодня из ${fmt(breakEven)}` : 'можно тратить в день';
+    const parts = [];
+    if (spentToday > 0) parts.push(`Сегодня уже потрачено ${fmt(spentToday)}.`);
+    // ФАКТ — при нынешнем темпе (реалистичный прогноз)
+    if (pic.avgFact > 0) {
+      if (pic.projDeltaFact >= 0) {
+        parts.push(`Сейчас тратишь ~${fmt(pic.avgFact)}/день (по факту) — при таком темпе к концу месяца отложишь ещё <strong style="color:var(--good)">+${fmt(pic.projDeltaFact)}</strong>.`);
+      } else {
+        parts.push(`Сейчас тратишь ~${fmt(pic.avgFact)}/день (по факту) — при таком темпе к концу месяца не хватит <strong style="color:var(--accent2)">${fmt(-pic.projDeltaFact)}</strong>: полезешь в накопления.`);
+      }
     }
+    // ЦЕЛЬ — к чему стремишься (влезает ли в бюджет)
+    if (pic.avgTarget != null) {
+      if (pic.targetDelta >= 0) {
+        const factVsTarget = pic.avgFact > pic.avgTarget ? ` Пока по факту больше цели на ${fmt(pic.avgFact - pic.avgTarget)}/день.` : '';
+        parts.push(`Цель ${fmt(pic.avgTarget)}/день — в рамках бюджета.${factVsTarget}`);
+      } else {
+        parts.push(`Цель ${fmt(pic.avgTarget)}/день — выше бюджета на ${fmt(-pic.targetDelta / pic.daysLeft)}/день: нужен доход больше или цель ниже.`);
+      }
+    } else if (pic.avgFact <= 0) {
+      parts.push('Добавь траты или задай целевой средний чек в «Балансах».');
+    }
+    sub.innerHTML = parts.join(' ');
+  } else {
+    // Честный 0: денег с учётом подушки и обязательных до конца месяца в обрез (это не баг, а правда)
+    dailyEl.textContent = '0 ₽';
+    dailyHeader.textContent = 'дневной бюджет';
+    barEl.style.width = '100%';
+    const cushionHint = pic.cushion > 0
+      ? ` Опусти подушку (${fmt(pic.cushion)}) в «Балансах», чтобы увидеть реальный запас.`
+      : '';
+    sub.innerHTML = `На счетах с учётом обязательных${pic.cushion > 0 ? ' и подушки' : ''} до конца месяца денег в обрез — любая трата уйдёт ${pic.cushion > 0 ? 'в подушку' : 'в минус'}.${cushionHint}`;
   }
 
   if (snapshot.nextPayDate) {
