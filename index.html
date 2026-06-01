@@ -2938,12 +2938,14 @@ function uncompleteGoal(id) {
   renderAll();
   toast(`↩︎ «${g.name}» снова в активных`);
 }
-// AUDIT P0-6 | Излишек earmark-дохода намеренно НЕ идёт в дневной бюджет текущего месяца
-// (Daniel: «излишек остаётся на следующий месяц бонусом, чтобы меньше надо было копить»).
-// Поведение: earmarkedIncomeTotal вычитается из freeIncome ЦЕЛИКОМ, излишек физически копится
-// на balance (BitZone's) и работает как roll-over буфер для будущего.
-// TODO (отдельная фича): показать «💎 Излишек earmark за этот месяц: +Y ₽ копится на BitZone's»
-// и в плане на следующий месяц учитывать этот буфер как уменьшение «надо отложить».
+// AUDIT P0-6 [FIXED 2026-06-01] | Раньше earmark-излишек «исчезал» из free()/дневного бюджета: при доходе,
+// зарезервированном под расход и кратно его превышающем (BitZone/тимлид под аренду), earmarkedIncomeTotal
+// вычитался из freeIncome ЦЕЛИКОМ, а покрытие засчитывалось только до суммы расхода — лишнее терялось и
+// «свободно на жизнь» уходило в ложный минус → ложный «0 ₽/день». Теперь free() и habit-affordability считают
+// от totals (доход − обязательства), без earmark-прогона — см. функцию free(). Earmark-излишек по-прежнему
+// физически копится на балансе (BitZone's) как сбережения; freeIncome()/uncoveredExpensesTotal() остались
+// только для earmark-дисплея «план vs факт аренды», не для свободного остатка.
+// TODO (отдельная фича): показать «💎 Излишек earmark за этот месяц: +Y ₽ копится на BitZone's».
 // ===== EARMARKED INCOME =====
 // Доход, зарезервированный под конкретный расход (BitZone → Квартира),
 // не распыляется на цели / дневной бюджет.
@@ -3059,7 +3061,12 @@ function totalHabitsMonthly() {
 }
 function totalPlannedCommitments() { return totalExpenses() + totalCredits() + totalGoalsMonthly() + totalHabitsMonthly(); }
 // «Свободный» месячный остаток с учётом зарезервированных доходов (BitZone → квартира и т.п.)
-function free() { return freeIncome() - uncoveredExpensesTotal() - totalCredits() - totalGoalsMonthly() - totalHabitsMonthly(); }
+// AUDIT P0-6 [FIXED 2026-06-01] | Считаем напрямую от totals, а НЕ через freeIncome()/uncoveredExpensesTotal().
+// Earmark-логика при излишке (доход, зарезервированный под расход, кратно его превышает) «теряла» лишнее
+// и уводила free в ложный минус (−88166 при реальных +186834) → ложный «0 ₽/день». Для «свободно на жизнь
+// в месяц» earmark не нужен: free = доход − все месячные обязательства. Earmark-излишек по-прежнему физически
+// копится на балансе как сбережения — это движение денег, не про эту формулу.
+function free() { return totalIncome() - totalPlannedCommitments(); }
 function daysInMonth() {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -3526,12 +3533,8 @@ function getSpendingPicture() {
   const daysLeft = Math.max(1, daysLeftInMonth());
   const dim = Math.max(1, daysInMonth());
 
-  // База — свободный доход за месяц = доход − (обязательные + кредиты + цели + привычки).
-  // ВАЖНО: берём totalIncome/totalPlannedCommitments напрямую, НЕ free(). free() прогоняет доход
-  // через earmark-логику, и при earmark-излишке (доход, зарезервированный под расход, кратно его
-  // превышает — как BitZone/тимлид под аренду) лишнее «исчезает» (баг P0-6) и свободное уходит в
-  // ложный минус → ложный 0. Прямой расчёт сходится со строками формулы «откуда дневной бюджет».
-  const monthlyFree = totalIncome() - totalPlannedCommitments();
+  // База — свободный доход за месяц (income-anchored). free() теперь считает от totals, без earmark-искажения (P0-6).
+  const monthlyFree = free();
   // Фактические разовые траты за этот месяц (без переводов между своими)
   const spentThisMonth = totalTransactionExpenses();
   const remainingFree = monthlyFree - spentThisMonth;
@@ -5425,7 +5428,7 @@ function toggleHabit(id) {
 
 // Проверка: «потяну ли я эту привычку» (cost за раз + freq)
 function habitAffordability(cost, freq) {
-  const monthlyFreeBeforeHabits = freeIncome() - uncoveredExpensesTotal() - totalCredits() - totalGoalsMonthly();
+  const monthlyFreeBeforeHabits = totalIncome() - totalExpenses() - totalCredits() - totalGoalsMonthly();
   const existingHabitsMonthly = totalHabitsMonthly();
   const remainingMonthly = monthlyFreeBeforeHabits - existingHabitsMonthly;
   const remainingDaily = remainingMonthly / 30;
@@ -5448,7 +5451,7 @@ function renderHabits() {
   if (!listEl || !cardEl) return;
 
   // Сводка «потяну ли я это всё»
-  const monthlyFreeBeforeHabits = freeIncome() - uncoveredExpensesTotal() - totalCredits() - totalGoalsMonthly();
+  const monthlyFreeBeforeHabits = totalIncome() - totalExpenses() - totalCredits() - totalGoalsMonthly();
   const habitsMonthly = totalHabitsMonthly();
   const habitsDaily = totalHabitsDaily();
   const leftover = monthlyFreeBeforeHabits - habitsMonthly;
