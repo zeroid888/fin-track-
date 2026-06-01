@@ -3526,8 +3526,12 @@ function getSpendingPicture() {
   const daysLeft = Math.max(1, daysLeftInMonth());
   const dim = Math.max(1, daysInMonth());
 
-  // База — свободный доход за месяц (income-anchored, накопления не трогаются)
-  const monthlyFree = free();
+  // База — свободный доход за месяц = доход − (обязательные + кредиты + цели + привычки).
+  // ВАЖНО: берём totalIncome/totalPlannedCommitments напрямую, НЕ free(). free() прогоняет доход
+  // через earmark-логику, и при earmark-излишке (доход, зарезервированный под расход, кратно его
+  // превышает — как BitZone/тимлид под аренду) лишнее «исчезает» (баг P0-6) и свободное уходит в
+  // ложный минус → ложный 0. Прямой расчёт сходится со строками формулы «откуда дневной бюджет».
+  const monthlyFree = totalIncome() - totalPlannedCommitments();
   // Фактические разовые траты за этот месяц (без переводов между своими)
   const spentThisMonth = totalTransactionExpenses();
   const remainingFree = monthlyFree - spentThisMonth;
