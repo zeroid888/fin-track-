@@ -2282,15 +2282,9 @@ button:focus, a:focus { outline: none; }
 
   <div class="card">
     <div class="card-title">Бюджет на жизнь</div>
-    <div class="grid-2">
-      <div class="form-group">
-        <label>Подушка, ₽ (не трогаем)</label>
-        <input id="budget-cushion" type="number" step="1000" placeholder="0">
-      </div>
-      <div class="form-group">
-        <label>Целевой средний чек, ₽/день</label>
-        <input id="budget-avgcheck" type="number" step="100" placeholder="к чему стремишься">
-      </div>
+    <div class="form-group">
+      <label>Целевой средний чек, ₽/день</label>
+      <input id="budget-avgcheck" type="number" step="100" placeholder="к чему стремишься">
     </div>
     <button class="btn btn-ghost" onclick="saveBudgetSettings()">💾 Сохранить</button>
     <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.5" id="budget-settings-hint"></div>
@@ -2534,8 +2528,7 @@ let state = {
   rates: { USD: 75, USDT: 75 },
   lastImport: null,
   userRules: [],    // правила автокатегоризации, заданные пользователем через UI «Переразметить контрагентов». { key, cat, createdAt }
-  cushionTarget: 0,   // ₽ подушки, которую НЕ трогаем при расчёте дневного бюджета (0 = выкл)
-  avgCheckTarget: null // ₽/день — ручной ориентир «средний чек на жизнь»; null = считать из истории транзакций
+  avgCheckTarget: null // ₽/день — целевой средний чек на жизнь (ориентир); null = считать из истории транзакций
 };
 
 // AUDIT P0-5 [FIXED 2026-05-14] | save() обёрнут в try/catch + блокировка через __SAVE_BLOCKED__,
@@ -2567,7 +2560,7 @@ function load() {
       // 1. Берём всё, что было сохранено, поверх дефолтов
       // AUDIT P0-8 [FIXED 2026-05-14] | Whitelist разрешённых ключей — мусор/фантомы из бэкапа
       // в state не попадают. При будущем переименовании поля добавь шаг миграции ниже.
-      const ALLOWED_KEYS = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances', 'rates', 'lastImport', 'userRules', 'cushionTarget', 'avgCheckTarget'];
+      const ALLOWED_KEYS = ['incomes', 'expenses', 'transactions', 'credits', 'goals', 'habits', 'balances', 'rates', 'lastImport', 'userRules', 'avgCheckTarget'];
       ALLOWED_KEYS.forEach(k => {
         if (parsed[k] !== undefined) state[k] = parsed[k];
       });
@@ -2590,9 +2583,7 @@ function load() {
         state.rates[cur] = (isFinite(p) && p > 0) ? p : 75;
       });
 
-      // Бюджет на жизнь: подушка (не трогаем) и ручной ориентир среднего чека.
-      // cushionTarget — число ≥ 0 (0 = выкл). avgCheckTarget — положительное число или null (null = считать из истории).
-      if (typeof state.cushionTarget !== 'number' || !isFinite(state.cushionTarget) || state.cushionTarget < 0) state.cushionTarget = 0;
+      // Целевой средний чек на жизнь: положительное число или null (null = считать из истории).
       if (state.avgCheckTarget != null && (typeof state.avgCheckTarget !== 'number' || !isFinite(state.avgCheckTarget) || state.avgCheckTarget <= 0)) state.avgCheckTarget = null;
 
       // 3. Добавляем новые поля старым записям (backward-compat)
@@ -3525,58 +3516,37 @@ function getCashflowSnapshot() {
     reserveTotal
   };
 }
-// Картина «сколько можно тратить в день» — по РЕАЛЬНЫМ деньгам на счетах (выбор Daniel 2026-06-01:
-// база = баланс счетов, бережём накопления). Заменяет старый smartDaily, который схлопывался в 0,
-// когда касса до ЗП уходила в минус (Путь B бага «0₽ надолго»).
-//   Доступно = деньги на денежных счетах + ЗП, что ещё придёт до конца месяца
-//            − аренда/кредиты до конца месяца − взносы в цели (прорейт) − подушка
-//   Можно в день = max(0, Доступно) ÷ дней до конца месяца
-// Дневной капающий доход (Bitzone/тимлид) НЕ берём как гарантированный — только то, что уже на счетах.
+// Картина «сколько можно тратить в день» — ПО ДОХОДУ, адаптивно (выбор Daniel 2026-06-01).
+// Живём на то, что зарабатываем; накопления НЕ считаются тратибельными (раньше «по счетам»
+// давало 23к/день, считая сбережения проедаемыми — это и было неверно).
+//   Свободно на жизнь / мес = доход − обязательные − кредиты − цели − привычки   (= free())
+//   Осталось = Свободно/мес − уже потрачено в этом месяце (разовые траты)
+//   Можно в день = max(0, Осталось) ÷ дней до конца месяца   (адаптивно: перетратил → ужалось)
 function getSpendingPicture() {
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const todayStr = todayIso();
   const daysLeft = Math.max(1, daysLeftInMonth());
   const dim = Math.max(1, daysInMonth());
-  const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
 
-  // 1) Деньги на денежных счетах (кредитки не в счёт), в ₽
-  const cashNow = (state.balances || []).filter(b => !isCreditCard(b))
-    .reduce((s, b) => s + toRub(b.amount, b.currency), 0);
+  // База — свободный доход за месяц (income-anchored, накопления не трогаются)
+  const monthlyFree = free();
+  // Фактические разовые траты за этот месяц (без переводов между своими)
+  const spentThisMonth = totalTransactionExpenses();
+  const remainingFree = monthlyFree - spentThisMonth;
+  // Адаптивно: остаток месячного бюджета на жизнь делим на оставшиеся дни
+  const breakEvenDaily = Math.max(0, remainingFree) / daysLeft;
 
-  // 2) Стабильный доход (только ЗП: monthly/semimonthly/yearly), который ЕЩЁ придёт до конца месяца
-  const stableIncomeAhead = allIncomeEventsForMonth(today)
-    .filter(e => ['monthly', 'semimonthly', 'yearly'].includes(e.freq) && e.date > todayStr)
-    .reduce((s, e) => s + e.amount, 0);
-
-  // 3) Обязательные датированные списания (аренда + кредиты), что ещё спишутся до конца месяца.
-  // Считаем СТРОГО с завтра: сегодняшнее списание либо уже ушло (уменьшило cashNow), либо
-  // всплывёт в модалке pending — иначе в день платежа оно вычиталось бы дважды. Симметрично
-  // с доходом выше (его тоже берём только date > сегодня).
-  const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
-  const debitsAhead = commitmentsBetween(tomorrow, monthEnd);
-
-  // 4) Взносы в активные цели за остаток месяца (прорейт по оставшимся дням)
-  const goalsAhead = totalGoalsMonthly() * (daysLeft / dim);
-
-  // 5) Подушка — не трогаем
-  const cushion = (typeof state.cushionTarget === 'number' && state.cushionTarget > 0) ? state.cushionTarget : 0;
-
-  const spendable = cashNow + stableIncomeAhead - debitsAhead - goalsAhead - cushion;
-  const breakEvenDaily = Math.max(0, spendable) / daysLeft;
-
-  // Два РАЗНЫХ средних чека (Daniel 2026-06-01): «факт» — что реально тратится (из истории
-  // транзакций); «цель» — к чему стремится (ручное avgCheckTarget, может быть null).
+  // Два РАЗНЫХ средних чека: «факт» — что реально тратится (из истории транзакций);
+  // «цель» — к чему стремится (ручное avgCheckTarget, может быть null).
   const avgFact = averageDailyLifeSpend();
   const avgTarget = (typeof state.avgCheckTarget === 'number' && state.avgCheckTarget > 0) ? state.avgCheckTarget : null;
 
-  // Прогноз строим от ФАКТА (реалистичный темп): сколько отложится (+) / не хватит (−) к концу месяца.
-  // targetDelta — то же для цели (влезает ли цель в бюджет).
+  // Прогноз от ФАКТА: уложишься в месячный бюджет на жизнь (+) или переберёшь его (−).
+  // targetDelta — то же для цели (влезает ли цель в дневной бюджет).
   const projDeltaFact = avgFact > 0 ? (breakEvenDaily - avgFact) * daysLeft : null;
   const targetDelta = avgTarget != null ? (breakEvenDaily - avgTarget) * daysLeft : null;
 
   return {
-    cashNow, stableIncomeAhead, debitsAhead, goalsAhead, cushion,
-    spendable, breakEvenDaily, avgFact, avgTarget, projDeltaFact, targetDelta,
+    monthlyFree, spentThisMonth, remainingFree, breakEvenDaily,
+    avgFact, avgTarget, projDeltaFact, targetDelta,
     daysLeft, dim
   };
 }
@@ -4886,15 +4856,13 @@ function editBalanceAmount(id) {
   save(); renderAll();
 }
 
-// Настройки «Бюджет на жизнь»: подушка (₽, не трогаем) + ручной средний чек (₽/день).
+// Настройки «Бюджет на жизнь»: целевой средний чек (₽/день, ориентир).
 function saveBudgetSettings() {
-  const c = parseAmount((document.getElementById('budget-cushion') || {}).value);
   const a = parseAmount((document.getElementById('budget-avgcheck') || {}).value);
-  state.cushionTarget = (isFinite(c) && c > 0) ? c : 0;
   state.avgCheckTarget = (isFinite(a) && a > 0) ? a : null;
   save();
   renderAll();
-  toast('💾 Бюджет на жизнь обновлён');
+  toast('💾 Целевой средний чек обновлён');
 }
 
 function saveRates() {
@@ -5105,14 +5073,11 @@ function renderBalances() {
   if (rT && document.activeElement !== rT) rT.value = state.rates.USDT;
 
   // Заполняем «Бюджет на жизнь» (не перетираем, пока пользователь печатает)
-  const cushEl = document.getElementById('budget-cushion');
   const avgEl = document.getElementById('budget-avgcheck');
-  if (cushEl && document.activeElement !== cushEl) cushEl.value = (state.cushionTarget > 0) ? state.cushionTarget : '';
   if (avgEl && document.activeElement !== avgEl) avgEl.value = (typeof state.avgCheckTarget === 'number' && state.avgCheckTarget > 0) ? state.avgCheckTarget : '';
   const bHint = document.getElementById('budget-settings-hint');
   if (bHint) {
-    const suggested = (totalExpenses() + totalCredits()) * 3;
-    bHint.innerHTML = `Подушка — сумма, которую не трогаем при расчёте дневного бюджета. Норма ≈3 мес обязательных = <strong>${fmt(suggested)}</strong>. Целевой средний чек — к чему стремишься (₽/день). Факт (сколько реально тратишь, сейчас ${fmt(averageDailyLifeSpend())}/день) считается из истории трат и показывается на дашборде отдельно.`;
+    bHint.innerHTML = `Целевой средний чек — к чему стремишься (₽/день). Факт (сколько реально тратишь, сейчас ${fmt(averageDailyLifeSpend())}/день) считается из истории трат сам и показывается на дашборде отдельно. Дневной бюджет считается по доходу (доход − обязательные − кредиты − цели − привычки), накопления не трогаются.`;
   }
 
   if (!state.balances || state.balances.length === 0) {
@@ -5742,25 +5707,26 @@ function renderLastEntryHint() {
   el.style.display = 'block';
 }
 
-// Мини-формула под дневным бюджетом: из чего собралось «доступно до конца месяца».
+// Мини-формула под дневным бюджетом: из чего собрался дневной бюджет на жизнь (по доходу).
 function fillSpendingFormula(pic, formula) {
   if (!formula) return;
-  if (!pic || (pic.cashNow === 0 && pic.stableIncomeAhead === 0)) {
-    formula.innerHTML = ''; formula.classList.remove('danger'); return;
-  }
+  const inc = totalIncome();
+  if (inc === 0) { formula.innerHTML = ''; formula.classList.remove('danger'); return; }
+  const exp = totalExpenses(), cr = totalCredits(), goals = totalGoalsMonthly(), habits = totalHabitsMonthly();
   const rows = [
-    `<div class="df-row"><span>Деньги на счетах</span><strong>${fmt(pic.cashNow)}</strong></div>`,
-    pic.stableIncomeAhead > 0 ? `<div class="df-row"><span>+ ЗП ещё придёт</span><span>${fmt(pic.stableIncomeAhead)}</span></div>` : '',
-    pic.debitsAhead > 0 ? `<div class="df-row"><span>− Аренда / кредиты до конца мес</span><span>${fmt(pic.debitsAhead)}</span></div>` : '',
-    pic.goalsAhead > 0 ? `<div class="df-row"><span>− Взносы в цели (остаток мес)</span><span>${fmt(pic.goalsAhead)}</span></div>` : '',
-    pic.cushion > 0 ? `<div class="df-row"><span>− Подушка (не трогаем)</span><span>${fmt(pic.cushion)}</span></div>` : '',
-    `<div class="df-row total"><span>${pic.spendable < 0 ? 'В обрез' : 'Доступно до конца месяца'}</span><strong style="color:${pic.spendable < 0 ? 'var(--accent2)' : 'var(--good)'}">${pic.spendable < 0 ? '−' + fmt(-pic.spendable) : fmt(pic.spendable)}</strong></div>`,
+    `<div class="df-row"><span>Доход / мес</span><strong>${fmt(inc)}</strong></div>`,
+    exp > 0 ? `<div class="df-row"><span>− Обязательные</span><span>${fmt(exp)}</span></div>` : '',
+    cr > 0 ? `<div class="df-row"><span>− Кредиты</span><span>${fmt(cr)}</span></div>` : '',
+    goals > 0 ? `<div class="df-row"><span>− Цели</span><span>${fmt(goals)}</span></div>` : '',
+    habits > 0 ? `<div class="df-row"><span>− Привычки</span><span>${fmt(habits)}</span></div>` : '',
+    `<div class="df-row total"><span>${pic.monthlyFree < 0 ? 'Дефицит' : 'Свободно на жизнь / мес'}</span><strong style="color:${pic.monthlyFree < 0 ? 'var(--accent2)' : 'var(--good)'}">${pic.monthlyFree < 0 ? '−' + fmt(-pic.monthlyFree) : fmt(pic.monthlyFree)}</strong></div>`,
+    pic.spentThisMonth > 0 ? `<div class="df-row"><span>− Уже потрачено в этом мес</span><span>${fmt(pic.spentThisMonth)}</span></div>` : '',
   ].filter(Boolean).join('');
   const dailyLine = pic.breakEvenDaily > 0
     ? `<div class="df-row total"><span>÷ ${pic.daysLeft} дн. до конца месяца</span><strong>≈ ${fmt(pic.breakEvenDaily)}/день</strong></div>`
-    : `<div class="df-row total"><span>На жизнь в этом месяце</span><strong style="color:var(--accent2)">0 ₽/день</strong></div>`;
+    : `<div class="df-row total"><span>На жизнь осталось</span><strong style="color:var(--accent2)">0 ₽/день</strong></div>`;
   formula.innerHTML = `<span class="df-title">Откуда дневной бюджет</span>${rows}${dailyLine}`;
-  formula.classList.toggle('danger', pic.spendable < 0);
+  formula.classList.toggle('danger', pic.remainingFree < 0);
 }
 function renderDashboard() {
   renderHeaderDate();
@@ -5845,7 +5811,7 @@ function renderDashboard() {
     }
   } catch (e) { /* ignore */ }
 
-  // ── Карточка «Сколько можно тратить» — по реальным деньгам на счетах (выбор Daniel 2026-06-01) ──
+  // ── Карточка «Сколько можно тратить» — по доходу, адаптивно (выбор Daniel 2026-06-01) ──
   const pic = getSpendingPicture();
   const todayKey = todayIso();
   const spentToday = state.transactions
@@ -5862,12 +5828,12 @@ function renderDashboard() {
 
   fillSpendingFormula(pic, formula);
   document.getElementById('dash-daily-max').textContent =
-    `доступно до конца месяца ${pic.spendable < 0 ? '−' + fmt(-pic.spendable) : fmt(pic.spendable)}`;
+    `осталось на жизнь до конца месяца ${pic.remainingFree < 0 ? '−' + fmt(-pic.remainingFree) : fmt(pic.remainingFree)}`;
 
-  if (inc === 0 && pic.cashNow === 0) {
+  if (inc === 0) {
     dailyEl.textContent = '—';
     dailyHeader.textContent = 'дневной бюджет';
-    sub.textContent = 'Добавь доходы, счета и расходы для расчёта';
+    sub.textContent = 'Добавь доходы и расходы для расчёта';
     barEl.style.width = '0%';
   } else if (breakEven > 0) {
     // Прогресс-бар = сколько от дневного уже потрачено сегодня
@@ -5876,15 +5842,15 @@ function renderDashboard() {
     dailyHeader.textContent = spentToday > 0 ? `осталось сегодня из ${fmt(breakEven)}` : 'можно тратить в день';
     const parts = [];
     if (spentToday > 0) parts.push(`Сегодня уже потрачено ${fmt(spentToday)}.`);
-    // ФАКТ — при нынешнем темпе (реалистичный прогноз)
+    // ФАКТ — при нынешнем темпе (реалистичный прогноз относительно месячного бюджета на жизнь)
     if (pic.avgFact > 0) {
       if (pic.projDeltaFact >= 0) {
-        parts.push(`Сейчас тратишь ~${fmt(pic.avgFact)}/день (по факту) — при таком темпе к концу месяца отложишь ещё <strong style="color:var(--good)">+${fmt(pic.projDeltaFact)}</strong>.`);
+        parts.push(`Сейчас тратишь ~${fmt(pic.avgFact)}/день (по факту) — при таком темпе уложишься в месяц и отложишь ещё <strong style="color:var(--good)">+${fmt(pic.projDeltaFact)}</strong>.`);
       } else {
-        parts.push(`Сейчас тратишь ~${fmt(pic.avgFact)}/день (по факту) — при таком темпе к концу месяца не хватит <strong style="color:var(--accent2)">${fmt(-pic.projDeltaFact)}</strong>: полезешь в накопления.`);
+        parts.push(`Сейчас тратишь ~${fmt(pic.avgFact)}/день (по факту) — при таком темпе переберёшь месячный бюджет на жизнь на <strong style="color:var(--accent2)">${fmt(-pic.projDeltaFact)}</strong> (полезешь в накопления).`);
       }
     }
-    // ЦЕЛЬ — к чему стремишься (влезает ли в бюджет)
+    // ЦЕЛЬ — к чему стремишься (влезает ли в дневной бюджет)
     if (pic.avgTarget != null) {
       if (pic.targetDelta >= 0) {
         const factVsTarget = pic.avgFact > pic.avgTarget ? ` Пока по факту больше цели на ${fmt(pic.avgFact - pic.avgTarget)}/день.` : '';
@@ -5897,14 +5863,15 @@ function renderDashboard() {
     }
     sub.innerHTML = parts.join(' ');
   } else {
-    // Честный 0: денег с учётом подушки и обязательных до конца месяца в обрез (это не баг, а правда)
+    // Честный 0 (по доходу): либо обязательства съели весь доход, либо месячный бюджет на жизнь уже выбран.
     dailyEl.textContent = '0 ₽';
     dailyHeader.textContent = 'дневной бюджет';
     barEl.style.width = '100%';
-    const cushionHint = pic.cushion > 0
-      ? ` Опусти подушку (${fmt(pic.cushion)}) в «Балансах», чтобы увидеть реальный запас.`
-      : '';
-    sub.innerHTML = `На счетах с учётом обязательных${pic.cushion > 0 ? ' и подушки' : ''} до конца месяца денег в обрез — любая трата уйдёт ${pic.cushion > 0 ? 'в подушку' : 'в минус'}.${cushionHint}`;
+    if (pic.monthlyFree <= 0) {
+      sub.innerHTML = 'Обязательные + цели + привычки ≥ дохода — на жизнь не остаётся. Сократи цели/привычки (вкладки «Цели» и «Привычки») или подними доход.';
+    } else {
+      sub.innerHTML = `Месячный бюджет на жизнь (${fmt(pic.monthlyFree)}) уже выбран${pic.spentThisMonth > 0 ? ` — потрачено ${fmt(pic.spentThisMonth)}` : ''}. Дальше до конца месяца — только из накоплений.`;
+    }
   }
 
   if (snapshot.nextPayDate) {
