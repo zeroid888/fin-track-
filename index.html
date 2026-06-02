@@ -6902,7 +6902,9 @@ function renderTransactions() {
     return;
   }
 
-  const expItems = items.filter(t => t.type !== 'income');
+  // Переводы 🔄 Между своими — это перемещение денег между своими счетами, не трата.
+  // Исключаем их из суммы/среднего/«плохих», в ленте показываем нейтрально (см. isTransferTx, P0-3).
+  const expItems = items.filter(t => t.type !== 'income' && !isTransferTx(t));
   const expTotal = expItems.reduce((s, t) => s + t.amount, 0);
   const avgCheck = expTotal > 0 ? expTotal / expItems.length : 0;
   const badTotal = expItems.filter(t => t.bad).reduce((s, t) => s + t.amount, 0);
@@ -6910,28 +6912,32 @@ function renderTransactions() {
   const badBlock = badTotal > 0
     ? `<div class="alert danger" style="margin-top:8px">🚫 Плохих трат: <strong>${fmt(badTotal)}</strong> (${badPct}% от всех). Это то, от чего хочется отказаться.</div>`
     : '';
-  let html = `<div class="alert">За этот месяц: <strong>${fmt(expTotal)}</strong> разовых трат · средний чек <strong>${fmt(avgCheck)}</strong> · записей ${items.length}</div>${badBlock}`;
+  let html = `<div class="alert">За этот месяц: <strong>${fmt(expTotal)}</strong> разовых трат · средний чек <strong>${fmt(avgCheck)}</strong> · записей ${expItems.length}</div>${badBlock}`;
   items.forEach(t => {
+    const isTransfer = isTransferTx(t);
     let sub = `${esc(t.date)} · ${esc(t.cat || '📦 Разное')}`;
     if (t.balanceId) {
       const bal = state.balances.find(b => b.id === t.balanceId);
       if (bal) sub += ` · 💳 ${esc(bal.name)}`;
     }
-    const isBad = t.bad && t.type !== 'income';
+    const isBad = t.bad && t.type !== 'income' && !isTransfer;
     const badMark = isBad ? ' <span style="color:#ff5a5a;font-weight:700">🚫</span>' : '';
-    const toggleBtn = t.type !== 'income'
+    const toggleBtn = (t.type !== 'income' && !isTransfer)
       ? `<button class="delete-btn" title="${isBad ? 'Убрать метку «плохая»' : 'Отметить как плохую трату'}" onclick="toggleTxBad('${t.id}')">${isBad ? '✓' : '🚫'}</button>`
       : '';
+    const amtHtml = isTransfer
+      ? `<div class="item-amount" style="color:var(--muted)">↔ ${fmt(t.amount)}</div>`
+      : `<div class="item-amount ${t.type === 'income' ? 'amount-green' : 'amount-red'}">${t.type === 'income' ? '+' : ''}${fmt(t.amount)}</div>`;
     html += `
       <div class="item-row" style="${isBad ? 'background:rgba(255,90,90,0.06);border-radius:12px' : ''}">
         <div class="item-left">
           <div class="two-row">
-            <div class="item-name">${t.name || t.desc || 'Операция'}${badMark}</div>
+            <div class="item-name">${esc(t.name || t.desc || 'Операция')}${badMark}</div>
             <div class="item-sub">${sub}</div>
           </div>
         </div>
         <div style="display:flex;align-items:center;gap:2px">
-          <div class="item-amount ${t.type === 'income' ? 'amount-green' : 'amount-red'}">${t.type === 'income' ? '+' : ''}${fmt(t.amount)}</div>
+          ${amtHtml}
           ${toggleBtn}
           <button class="delete-btn" onclick="deleteTransaction('${t.id}')">✕</button>
         </div>
@@ -10062,8 +10068,8 @@ function renderPendingEventsLists() {
                 <div style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700">${fmtCur(p.amount, p.currency)}</div>
               </div>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
-                <button class="btn btn-primary" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="confirmDeduction('${esc(p.expId)}','${esc(p.monthKey)}')">✅ Списать с баланса</button>
-                <button class="btn btn-ghost" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="markPaidExternal('${esc(p.expId)}','${esc(p.monthKey)}')">💳 Уже оплатил сам</button>
+                <button class="btn btn-primary" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="openDeductionPay('${esc(p.expId)}','${esc(p.monthKey)}')">✅ Оплатить</button>
+                <button class="btn btn-ghost" style="flex:1;min-width:120px;font-size:12px;padding:10px" onclick="markPaidExternal('${esc(p.expId)}','${esc(p.monthKey)}')">💳 Оплатил вне трекера</button>
                 <button class="btn btn-ghost" style="flex:1;min-width:110px;font-size:12px;padding:10px;color:var(--accent2)" onclick="skipDeductionMonth('${esc(p.expId)}','${esc(p.monthKey)}')">⏭ Пропустить месяц</button>
               </div>
             </div>`;
@@ -10121,6 +10127,149 @@ function skipDeductionMonth(expId, monthKey) {
     renderAll();
     renderPendingEventsLists();
   }
+}
+
+// ===== Оплата планового расхода с выбором баланса(ов) =====
+// Вместо жёсткой привязки к одному настроенному балансу — пользователь указывает, с какого счёта
+// реально ушли деньги (можно разбить на два источника: наличка + карта). Списывает точно, пишет
+// расход в историю (как applyDeduction), помечает месяц оплаченным.
+function balanceOptionsHtml(selectedId) {
+  return (state.balances || []).map(b =>
+    `<option value="${esc(b.id)}"${b.id === selectedId ? ' selected' : ''}>${esc(b.emoji || '💳')} ${esc(b.name)} (${fmtCur(b.amount, b.currency)})</option>`
+  ).join('');
+}
+function openDeductionPay(expId, monthKey) {
+  const exp = (state.expenses || []).find(e => e.id === expId);
+  if (!exp) return;
+  if (!(state.balances || []).length) { alert('Нет счетов — заведи баланс в «Балансы».'); return; }
+  const cfgBal = state.balances.find(b => b.id === exp.balanceId);
+  const cfgCur = cfgBal ? cfgBal.currency : 'RUB';
+  const dueRub = typeof exp.amount === 'number' ? exp.amount : 0;
+  const defAmt = cfgBal ? fromRub(dueRub, cfgCur) : dueRub;
+  const host = document.getElementById('deduction-pay-modal') || (() => {
+    const d = document.createElement('div');
+    d.id = 'deduction-pay-modal';
+    d.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:10000;padding:16px';
+    document.body.appendChild(d);
+    return d;
+  })();
+  host.dataset.expId = expId;
+  host.dataset.monthKey = monthKey;
+  host.dataset.dueRub = String(dueRub);
+  host.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;max-width:420px;width:100%;padding:20px;max-height:88vh;overflow:auto">
+      <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;margin-bottom:2px">Оплата: ${esc(exp.name)}</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px">К оплате: ${fmt(dueRub)}</div>
+      <div class="form-group">
+        <label>Откуда списать</label>
+        <select id="dpay-bal-1" onchange="updateDpayTotals()">${balanceOptionsHtml(exp.balanceId)}</select>
+        <input id="dpay-amt-1" type="number" inputmode="decimal" value="${defAmt}" oninput="updateDpayTotals()" style="margin-top:8px">
+      </div>
+      <div id="dpay-src2" style="display:none">
+        <div class="form-group">
+          <label>Второй источник</label>
+          <select id="dpay-bal-2" onchange="updateDpayTotals()">${balanceOptionsHtml('')}</select>
+          <input id="dpay-amt-2" type="number" inputmode="decimal" placeholder="0" oninput="updateDpayTotals()" style="margin-top:8px">
+        </div>
+      </div>
+      <button id="dpay-split-btn" class="btn btn-ghost" style="font-size:12px;padding:8px;width:100%" onclick="toggleDpaySplit()">➕ Разбить на второй источник</button>
+      <div id="dpay-total" style="font-size:13px;margin-top:12px;padding:10px 12px;background:var(--surface2);border-radius:10px"></div>
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="btn btn-ghost" onclick="closeDeductionPay()" style="flex:1">Отмена</button>
+        <button class="btn btn-primary" onclick="confirmDeductionPay()" style="flex:2">✓ Оплатить</button>
+      </div>
+    </div>`;
+  updateDpayTotals();
+}
+function dpaySourceRub(balSelId, amtId) {
+  const sel = document.getElementById(balSelId);
+  const amtEl = document.getElementById(amtId);
+  if (!sel || !amtEl) return { rub: 0, amt: 0, bal: null };
+  const bal = (state.balances || []).find(b => b.id === sel.value) || null;
+  const amt = parseAmount(amtEl.value);
+  if (!bal || isNaN(amt) || amt <= 0) return { rub: 0, amt: 0, bal };
+  return { rub: toRub(amt, bal.currency), amt, bal };
+}
+function dpayIsSplit() {
+  const el = document.getElementById('dpay-src2');
+  return !!el && el.style.display !== 'none';
+}
+function toggleDpaySplit() {
+  const el = document.getElementById('dpay-src2');
+  const btn = document.getElementById('dpay-split-btn');
+  if (!el) return;
+  const willShow = el.style.display === 'none';
+  el.style.display = willShow ? 'block' : 'none';
+  if (btn) btn.textContent = willShow ? '➖ Убрать второй источник' : '➕ Разбить на второй источник';
+  updateDpayTotals();
+}
+function updateDpayTotals() {
+  const host = document.getElementById('deduction-pay-modal');
+  if (!host) return;
+  const due = parseFloat(host.dataset.dueRub) || 0;
+  const s1 = dpaySourceRub('dpay-bal-1', 'dpay-amt-1');
+  const s2 = dpayIsSplit() ? dpaySourceRub('dpay-bal-2', 'dpay-amt-2') : { rub: 0 };
+  const sum = s1.rub + s2.rub;
+  const el = document.getElementById('dpay-total');
+  if (!el) return;
+  const ok = Math.abs(sum - due) <= Math.max(1, due * 0.02);
+  const col = ok ? 'var(--good)' : 'var(--accent2)';
+  const diff = ok ? ' ✓' : ` · разница ${fmt(Math.abs(sum - due))}`;
+  el.innerHTML = `Итого: <b style="color:${col}">${fmt(sum)}</b> из ${fmt(due)}${diff}`;
+}
+function closeDeductionPay() {
+  const host = document.getElementById('deduction-pay-modal');
+  if (host) host.remove();
+}
+function confirmDeductionPay() {
+  const host = document.getElementById('deduction-pay-modal');
+  if (!host) return;
+  const expId = host.dataset.expId, monthKey = host.dataset.monthKey;
+  const exp = (state.expenses || []).find(e => e.id === expId);
+  if (!exp) { closeDeductionPay(); return; }
+  if (!Array.isArray(exp.deductionLog)) exp.deductionLog = [];
+  if (exp.deductionLog.includes(monthKey)) { closeDeductionPay(); return; }
+
+  const sources = [dpaySourceRub('dpay-bal-1', 'dpay-amt-1')];
+  if (dpayIsSplit()) sources.push(dpaySourceRub('dpay-bal-2', 'dpay-amt-2'));
+  const valid = sources.filter(s => s.bal && s.amt > 0);
+  if (!valid.length) { alert('Укажи сумму больше 0'); return; }
+  if (valid.length === 2 && valid[0].bal.id === valid[1].bal.id) { alert('Источники должны быть разными счетами.'); return; }
+
+  // Confirm на уход баланса в минус — по каждому источнику
+  for (const s of valid) {
+    if (s.bal.amount < s.amt) {
+      if (!confirm(`На «${s.bal.name}» только ${fmtCur(s.bal.amount, s.bal.currency)}, а списываем ${fmtCur(s.amt, s.bal.currency)}. Баланс уйдёт в минус. Продолжить?`)) return;
+    }
+  }
+
+  const [yy, mm] = monthKey.split('-');
+  const yNum = parseInt(yy, 10), mNum = parseInt(mm, 10) - 1;
+  const day = clampDayToMonth(exp.payDay || 1, yNum, mNum);
+  const txDate = `${yy}-${mm}-${String(day).padStart(2, '0')}`;
+
+  valid.forEach((s, idx) => {
+    s.bal.amount = Math.round((s.bal.amount - s.amt) * 100) / 100;
+    state.transactions.push({
+      id: safeId(),
+      type: 'expense',
+      date: txDate,
+      name: valid.length > 1 ? `${exp.name} (${idx + 1}/${valid.length})` : exp.name,
+      amount: Math.round(s.rub * 100) / 100,
+      cat: exp.cat || '🏠 Жильё',
+      balanceId: s.bal.id,
+      nativeAmount: s.amt,
+      nativeCurrency: s.bal.currency,
+      source: 'deduction-paid',
+      bad: false
+    });
+  });
+  exp.deductionLog.push(monthKey);
+  save();
+  closeDeductionPay();
+  toast('Оплачено и записано в историю', 'good');
+  renderAll();
+  renderPendingEventsLists();
 }
 
 // Credit pending handlers
