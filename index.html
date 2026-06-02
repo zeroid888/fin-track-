@@ -1595,6 +1595,12 @@ button:focus, a:focus { outline: none; }
     </div>
   </div>
 
+  <!-- Накопительный эффект дисциплины: стрик ниже нормы + сверх плана + прогноз к концу месяца -->
+  <div id="discipline-block" style="display:none;margin-bottom:12px"></div>
+
+  <!-- Симулятор покупки «дотяну ли на покупку» -->
+  <button onclick="openAffordSim()" style="width:100%;margin-bottom:16px;padding:12px;border-radius:12px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">🛍 Дотяну ли на покупку?</button>
+
   <!-- V2: Health score -->
   <div class="health-card" id="dash-health-card">
     <div class="health-ring">
@@ -3026,7 +3032,8 @@ function earmarkPlannedThisMonth(expenseId) {
 function averageDailyLifeSpend() {
   const txs = (state.transactions || []).filter(t =>
     t.type === 'expense' &&
-    t.cat !== '🔄 Между своими' &&
+    !isTransferTx(t) &&
+    !isPlannedTx(t) &&
     t.amount > 0 &&
     /^\d{4}-\d{2}-\d{2}$/.test(t.date || '')
   );
@@ -3112,7 +3119,28 @@ function currentMonthTransactions() {
 function isTransferTx(t) {
   return t.cat === '🔄 Между своими' || !!t.transferPairId;
 }
+// Плановое обязательство (аренда, подписки, интернет — расходы с графиком списания), проведённое
+// через модалку оплаты. Это реальные деньги (учитываются в месячном факте, истории, итогах месяца),
+// но НЕ импульсная «разовая трата» — поэтому исключаются из «Сегодня», среднего чека жизни и ленты
+// разовых трат, чтобы крупная аренда не искажала дневную картину.
+function isPlannedTx(t) {
+  return t && (t.source === 'auto-deduction' || t.source === 'deduction-paid');
+}
+// ЕДИНЫЙ предикат «импульсная дневная трата»: расход, не перевод, не плановое обязательство.
+// Используется ВЕЗДЕ, где считаются/показываются дневные/разовые траты — чтобы не было поверхности,
+// где аренда снова течёт как дневная трата (иначе рассинхрон между дашбордом, спарклайном и лентой).
+function isDailySpendTx(t) {
+  return !!t && t.type !== 'income' && !isTransferTx(t) && !isPlannedTx(t);
+}
 function totalTransactionExpenses() {
+  // «Разовые траты месяца» (импульс). Плановые обязательства (аренда и т.п.) исключаем — они уже
+  // учтены в totalExpenses() как месячное обязательство; иначе аренда-транзакция вычлась бы дважды
+  // из дневного бюджета (раз в monthlyFree как обязательство, два — здесь как трата).
+  return currentMonthTransactions().filter(isDailySpendTx).reduce((s, t) => s + t.amount, 0);
+}
+// Полный факт-расход месяца ВКЛЮЧАЯ плановые обязательства (но без переводов). Нужен в getCashflowSnapshot:
+// там остаток до выплаты считается от валового полученного дохода и должен вычитать уже оплаченную аренду.
+function totalTransactionExpensesAll() {
   return currentMonthTransactions()
     .filter(t => t.type !== 'income' && !isTransferTx(t))
     .reduce((s, t) => s + t.amount, 0);
@@ -3384,8 +3412,13 @@ function commitmentsBetween(todayDate, untilDate) {
   iterMonths.forEach(mDate => {
     const y = mDate.getFullYear();
     const mi = mDate.getMonth();
+    const mk = `${y}-${String(mi + 1).padStart(2, '0')}`;
     state.expenses.forEach(exp => {
       if (!exp.payDay) return;
+      // Уже оплачено/пропущено в этом месяце — это НЕ предстоящее списание (иначе двойной учёт с
+      // actualDailyNetAll, куда уже-оплаченная аренда попадает транзакцией). Single source of truth.
+      if (Array.isArray(exp.deductionLog) && exp.deductionLog.includes(mk)) return;
+      if (Array.isArray(exp.skippedMonths) && exp.skippedMonths.includes(mk)) return;
       const day = clampDayToMonth(exp.payDay, y, mi);
       const d = new Date(y, mi, day);
       if (d < today || d > until) return;
@@ -3427,7 +3460,12 @@ function getCashflowSnapshot() {
   const sameDayNames = sameDayStable.map(e => e.incomeName).filter(Boolean);
 
   const receivedIncome = receivedEvents.reduce((s, e) => s + e.amount, 0);
-  const actualDailyNet = totalTransactionExpenses() - totalTransactionIncome();
+  const txIncomeMonth = totalTransactionIncome();
+  // impulse-only — для fallback-ветки, где база free() уже вычла обязательства (иначе двойной учёт аренды).
+  const actualDailyNet = totalTransactionExpenses() - txIncomeMonth;
+  // incl. уже оплаченные плановые (аренда) — для nextEvent-ветки, где остаток считается от валового дохода
+  // и уже оплаченное обязательство должно быть вычтено (иначе leftBeforeNext завышен и алерт кассового разрыва молчит).
+  const actualDailyNetAll = totalTransactionExpensesAll() - txIncomeMonth;
 
   // Разделяем списания на «с датой» и «без даты»
   const activeExpenses = state.expenses.filter(e => !isExpenseFinished(e));
@@ -3475,9 +3513,9 @@ function getCashflowSnapshot() {
     scheduledDebits = commitmentsBetween(today, lastDay);
   }
 
-  let leftBeforeNext = receivedIncome - reservedByToday - actualDailyNet - scheduledDebits;
+  let leftBeforeNext = receivedIncome - reservedByToday - actualDailyNetAll - scheduledDebits;
   if (!nextEvent) {
-    // если выплат нет — fallback на старую логику
+    // если выплат нет — fallback на free() (она уже вычла обязательства → здесь только impulse-расход)
     leftBeforeNext = free() - actualDailyNet - scheduledDebits;
   }
 
@@ -3578,6 +3616,60 @@ function getSpendingPicture() {
 function dailyBudget() {
   // Одно число везде (дашборд, спарклайн, пейсинг): дневной бюджет «по счетам, бережём накопления».
   return getSpendingPicture().breakEvenDaily;
+}
+
+// Накопительный эффект дисциплины: стрик дней ниже нормы + сколько отложено сверх + прогноз к концу месяца.
+// Стабильная норма = свободный доход за месяц / дней в месяце (НЕ адаптивный breakEvenDaily — он скачет).
+function getDisciplineSnapshot() {
+  const pic = getSpendingPicture();
+  const dim = Math.max(1, daysInMonth());
+  const daysPassed = Math.max(1, daysPassedInMonth());
+  const dailyAllowance = pic.monthlyFree > 0 ? pic.monthlyFree / dim : 0;
+  // Сверх плана к текущему дню: норма × прошедшие дни − фактически потрачено (импульс). Минус = перебор.
+  const surplusToDate = dailyAllowance * daysPassed - pic.spentThisMonth;
+  // Прогноз к концу месяца от текущего темпа (avgFact). Минус = переберёшь свободный бюджет.
+  const projEndSurplus = pic.remainingFree - pic.avgFact * pic.daysLeft;
+  // Стрик завершённых дней (со вчера назад, в пределах текущего месяца), где импульсные траты дня ≤ нормы.
+  let streak = 0;
+  if (dailyAllowance > 0) {
+    // Не накручиваем стрик пустыми днями ДО первой записи учёта (иначе «начал вести 10-го» → ложные 9 дней).
+    const txDates = (state.transactions || []).map(t => t.date).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d || ''));
+    const firstTx = txDates.length ? txDates.reduce((a, b) => (a < b ? a : b)) : null;
+    for (let back = 1; back <= 62; back++) {
+      const d = ymdFromDaysAgo(back);
+      if (d.slice(0, 7) !== currentMonthKey()) break; // норма считается по этому месяцу
+      if (firstTx && d < firstTx) break; // до первой транзакции данных нет — стрик не продлеваем
+      const daySpend = (state.transactions || [])
+        .filter(t => t.date === d && isDailySpendTx(t))
+        .reduce((s, t) => s + (t.amount || 0), 0);
+      if (daySpend <= dailyAllowance) streak++; else break;
+    }
+  }
+  return { hasFree: pic.monthlyFree > 0, dailyAllowance, surplusToDate, projEndSurplus, streak };
+}
+
+// Симулятор «дотяну ли на покупку»: чистая функция. driver — какой ползунок ведущий ('spend' | 'days').
+// B — свободно/день, P — цена, S — трачу/день, N — дней. Излишек/день = B−S, N = ⌈P/(B−S)⌉.
+function simAfford(o) {
+  const B = o.B, P = o.P, daysLeft = Math.max(1, o.daysLeft || 1), remainingFree = o.remainingFree || 0;
+  if (!(B > 0) || !(P > 0)) return { ok: false };
+  const Nmin = Math.max(1, Math.ceil(P / B)); // быстрее всего — когда тратишь 0
+  let S, N;
+  if (o.driver === 'days') {
+    N = Math.max(Nmin, Math.round(o.N || Nmin));
+    S = Math.max(0, B - P / N);
+  } else {
+    S = Math.min(B, Math.max(0, o.S || 0));
+    const surplus = B - S;
+    N = surplus > 0 ? Math.ceil(P / surplus) : Infinity;
+  }
+  const perDaySaved = B - S;
+  const endSurplus = remainingFree - S * daysLeft; // что останется свободным к концу месяца при темпе S
+  const feasibleThisMonth = isFinite(N) && N <= daysLeft;
+  const buyNow = remainingFree >= P
+    ? { canNow: true, leftDaily: (remainingFree - P) / daysLeft }
+    : { canNow: false, shortfall: P - remainingFree };
+  return { ok: true, B, P, S, N, Nmin, perDaySaved, endSurplus, feasibleThisMonth, buyNow };
 }
 
 // ===== INCOME =====
@@ -5584,8 +5676,10 @@ function ymdFromDaysAgo(n) {
 function renderTodayCompare() {
   const todayStr = todayIso();
   const yStr = ymdFromDaysAgo(1);
-  const todayTx = state.transactions.filter(t => t.date === todayStr && t.type !== 'income');
-  const yTx = state.transactions.filter(t => t.date === yStr && t.type !== 'income');
+  // Только импульсные «разовые траты»: без переводов между счетами и без плановых обязательств (аренда).
+  const isDailySpend = isDailySpendTx;
+  const todayTx = state.transactions.filter(t => t.date === todayStr && isDailySpend(t));
+  const yTx = state.transactions.filter(t => t.date === yStr && isDailySpend(t));
   const todaySum = todayTx.reduce((s, t) => s + t.amount, 0);
   const ySum = yTx.reduce((s, t) => s + t.amount, 0);
 
@@ -5840,7 +5934,7 @@ function renderDashboard() {
   const pic = getSpendingPicture();
   const todayKey = todayIso();
   const spentToday = state.transactions
-    .filter(t => t.date === todayKey && t.type !== 'income' && !isTransferTx(t))
+    .filter(t => t.date === todayKey && isDailySpendTx(t))
     .reduce((s, t) => s + t.amount, 0);
   const breakEven = pic.breakEvenDaily;
   const remainingToday = Math.max(0, breakEven - spentToday);
@@ -5999,7 +6093,10 @@ function renderDashboard() {
   state.expenses.forEach(e => {
     cats[e.cat] = (cats[e.cat] || 0) + e.amount;
   });
-  currentMonthTransactions().filter(t => t.type !== 'income').forEach(t => {
+  // Только импульсные траты: плановые (аренда) уже учтены строкой выше из state.expenses — иначе задвоятся
+  // в числителе, тогда как знаменатель totalSpend считает их один раз → проценты уходят за 100%. Плюс
+  // isDailySpendTx убирает утечку переводов 🔄 в разбивку.
+  currentMonthTransactions().filter(isDailySpendTx).forEach(t => {
     cats[t.cat] = (cats[t.cat] || 0) + t.amount;
   });
   // AUDIT P0-15 | Два бага в одной строке: (1) c.monthly вместо creditMonthlyEq(c) — для
@@ -6475,7 +6572,7 @@ function renderBadSpending() {
 
   const ymKey = currentMonthKey();
   const monthTxs = (state.transactions || []).filter(t =>
-    t.type !== 'income' &&
+    isDailySpendTx(t) &&
     /^\d{4}-\d{2}-\d{2}$/.test(t.date || '') &&
     t.date.slice(0, 7) === ymKey
   );
@@ -6604,7 +6701,7 @@ function renderUpcomingCalendar() {
   const lifeHeader = avgDaily > 0
     ? `<div style="padding:10px 12px;background:#141823;border-radius:10px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);line-height:1.4">
         <span>🍔 <strong style="color:#e8ecf4">Средний чек жизни</strong><br>
-          <span style="font-size:11px">по истории ${(state.transactions || []).filter(t => t.type === 'expense').length} операций</span></span>
+          <span style="font-size:11px">по истории ${(state.transactions || []).filter(isDailySpendTx).length} операций</span></span>
         <span style="font-family:'Unbounded',sans-serif;font-size:15px;font-weight:700;color:#ff9f4f">−${fmt(avgDaily)}<span style="font-size:11px;color:var(--muted);font-weight:400">/день</span></span>
       </div>`
     : `<div style="padding:10px 12px;background:#141823;border-radius:10px;margin-bottom:14px;font-size:11px;color:var(--muted);line-height:1.5">
@@ -6906,9 +7003,10 @@ function renderTransactions() {
     return;
   }
 
-  // Переводы 🔄 Между своими — это перемещение денег между своими счетами, не трата.
-  // Исключаем их из суммы/среднего/«плохих», в ленте показываем нейтрально (см. isTransferTx, P0-3).
-  const expItems = items.filter(t => t.type !== 'income' && !isTransferTx(t));
+  // Из «разовых трат» исключаем переводы между счетами (↔) и плановые обязательства (аренда и т.п.) —
+  // это не импульсные траты. В ленте они показаны нейтрально и помечены, в сумму/средний чек не идут.
+  const isDaily = isDailySpendTx;
+  const expItems = items.filter(isDaily);
   const expTotal = expItems.reduce((s, t) => s + t.amount, 0);
   const avgCheck = expTotal > 0 ? expTotal / expItems.length : 0;
   const badTotal = expItems.filter(t => t.bad).reduce((s, t) => s + t.amount, 0);
@@ -6919,19 +7017,24 @@ function renderTransactions() {
   let html = `<div class="alert">За этот месяц: <strong>${fmt(expTotal)}</strong> разовых трат · средний чек <strong>${fmt(avgCheck)}</strong> · записей ${expItems.length}</div>${badBlock}`;
   items.forEach(t => {
     const isTransfer = isTransferTx(t);
+    const isPlanned = isPlannedTx(t);
+    const excluded = isTransfer || isPlanned;
     let sub = `${esc(t.date)} · ${esc(t.cat || '📦 Разное')}`;
+    if (isPlanned) sub += ' · плановое';
     if (t.balanceId) {
       const bal = state.balances.find(b => b.id === t.balanceId);
       if (bal) sub += ` · 💳 ${esc(bal.name)}`;
     }
-    const isBad = t.bad && t.type !== 'income' && !isTransfer;
+    const isBad = t.bad && t.type !== 'income' && !excluded;
     const badMark = isBad ? ' <span style="color:#ff5a5a;font-weight:700">🚫</span>' : '';
-    const toggleBtn = (t.type !== 'income' && !isTransfer)
+    const toggleBtn = (t.type !== 'income' && !excluded)
       ? `<button class="delete-btn" title="${isBad ? 'Убрать метку «плохая»' : 'Отметить как плохую трату'}" onclick="toggleTxBad('${t.id}')">${isBad ? '✓' : '🚫'}</button>`
       : '';
     const amtHtml = isTransfer
       ? `<div class="item-amount" style="color:var(--muted)">↔ ${fmt(t.amount)}</div>`
-      : `<div class="item-amount ${t.type === 'income' ? 'amount-green' : 'amount-red'}">${t.type === 'income' ? '+' : ''}${fmt(t.amount)}</div>`;
+      : isPlanned
+        ? `<div class="item-amount" style="color:var(--muted)">🗓 ${fmt(t.amount)}</div>`
+        : `<div class="item-amount ${t.type === 'income' ? 'amount-green' : 'amount-red'}">${t.type === 'income' ? '+' : ''}${fmt(t.amount)}</div>`;
     html += `
       <div class="item-row" style="${isBad ? 'background:rgba(255,90,90,0.06);border-radius:12px' : ''}">
         <div class="item-left">
@@ -8616,20 +8719,21 @@ function reviewFactForMonth(ym) {
     t.date.slice(0, 7) === ym &&
     !isTransferTx(t)
   );
-  let income = 0, expense = 0;
+  let income = 0, expense = 0, plannedExpense = 0, dailyExpense = 0;
   const catMap = {};
   txs.forEach(t => {
     const amt = t.amount || 0;
     if (t.type === 'income') { income += amt; }
     else {
       expense += amt;
+      if (isPlannedTx(t)) plannedExpense += amt; else dailyExpense += amt;
       const c = t.cat || 'Без категории';
       if (!catMap[c]) catMap[c] = { cat: c, sum: 0, count: 0 };
       catMap[c].sum += amt; catMap[c].count++;
     }
   });
   const cats = Object.values(catMap).sort((a, b) => b.sum - a.sum);
-  return { income, expense, cats, txCount: txs.length };
+  return { income, expense, plannedExpense, dailyExpense, cats, txCount: txs.length };
 }
 // План дохода именно за этот месяц (расписание выплат), а не «на сегодня».
 function reviewPlanIncome(ym) {
@@ -8690,6 +8794,7 @@ function computeMonthlyReview(ym, opts) {
   return {
     ym, live,
     income: fact.income, expense: fact.expense, net,
+    plannedExpense: fact.plannedExpense, dailyExpense: fact.dailyExpense,
     planIncome, planExpense,
     cats: fact.cats,
     avgDay, projectedExpense, totalDays, daysElapsed,
@@ -8728,11 +8833,12 @@ function renderMonthlyReviewBody(r) {
         <div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)">Расход</div>
         <div style="font-size:16px;font-weight:700">${fmt(r.expense)}</div>
         <div style="font-size:10px;color:var(--muted);line-height:1.4">${expSub}</div>
+        ${r.plannedExpense !== undefined ? `<div style="font-size:10px;color:var(--muted);line-height:1.4;margin-top:2px">плановые ${fmt(r.plannedExpense)} · ежедн ${fmt(r.dailyExpense)}</div>` : ''}
       </div>
       <div style="background:var(--surface2);border-radius:12px;padding:10px">
         <div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)">${r.net >= 0 ? 'Отложено' : 'В минус'}</div>
         <div style="font-size:16px;font-weight:700;color:${netColor}">${r.net >= 0 ? '+' : '−'}${fmt(Math.abs(r.net))}</div>
-        <div style="font-size:10px;color:var(--muted);line-height:1.4">${fmt(r.avgDay)}/день</div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.4">${fmt(r.avgDay)}/день всего</div>
       </div>
     </div>`;
 
@@ -8961,17 +9067,13 @@ function haptic(kind) {
 }
 
 // --- helpers: daily spending rollup ---
-function ymdFromDaysAgo(n) {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-}
+// (ymdFromDaysAgo определена выше — дубль удалён, чтобы правка одной копии не расходилась с другой)
 function dailyExpenseTotals(daysBack = 14) {
   const out = [];
   for (let i = daysBack - 1; i >= 0; i--) {
     const iso = ymdFromDaysAgo(i);
     const sum = state.transactions
-      .filter(t => t.date === iso && t.type !== 'income')
+      .filter(t => t.date === iso && isDailySpendTx(t))
       .reduce((s, t) => s + t.amount, 0);
     out.push({ date: iso, sum });
   }
@@ -9178,7 +9280,7 @@ function renderSparkDayPanel() {
   if (!_selectedSparkDate) { panel.classList.add('hidden'); panel.innerHTML=''; return; }
   panel.classList.remove('hidden');
   const date = _selectedSparkDate;
-  const dayTx = (state.transactions || []).filter(t => t.date === date && t.type !== 'income');
+  const dayTx = (state.transactions || []).filter(t => t.date === date && isDailySpendTx(t));
   const dayInc = (state.transactions || []).filter(t => t.date === date && t.type === 'income');
   const totalSpent = dayTx.reduce((s, t) => s + (t.amount || 0), 0);
   const totalIn = dayInc.reduce((s, t) => s + (t.amount || 0), 0);
@@ -9354,7 +9456,7 @@ function renderInsights() {
   }
 
   // 5. Big category share
-  const cm = currentMonthTransactions().filter(t => t.type !== 'income');
+  const cm = currentMonthTransactions().filter(isDailySpendTx);
   const txTotal = cm.reduce((s, t) => s + t.amount, 0);
   if (txTotal > 5000) {
     const byCat = {};
@@ -9905,6 +10007,152 @@ function renderV2() {
   try { renderHealthMetrics(); } catch (e) { console.error(e); }
   try { renderCreditCards(); } catch (e) { console.error(e); }
   try { renderPendingBanner(); } catch (e) { console.error(e); }
+  try { renderDisciplineBlock(); } catch (e) { console.error(e); }
+}
+
+// Блок дисциплины на дашборде: стрик дней ниже нормы + сверх плана отложено + прогноз к концу месяца.
+function renderDisciplineBlock() {
+  const el = document.getElementById('discipline-block');
+  if (!el) return;
+  const d = getDisciplineSnapshot();
+  if (!d.hasFree) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const surplusPos = d.surplusToDate >= 0;
+  const projPos = d.projEndSurplus >= 0;
+  const streakLine = d.streak >= 2
+    ? `<div style="font-weight:700;font-size:13px">🔥 ${d.streak} ${pluralRu(d.streak, 'день', 'дня', 'дней')} подряд ниже нормы</div>`
+    : `<div style="font-weight:700;font-size:13px">Дисциплина трат</div>`;
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div style="padding:12px 16px;border-radius:12px;border:1px solid var(--border);background:var(--surface2)">
+      ${streakLine}
+      <div style="font-size:12px;color:var(--muted);margin-top:4px;line-height:1.5">
+        Сверх плана ${surplusPos ? 'отложено' : 'перебор'} <b style="color:${surplusPos ? 'var(--good)' : 'var(--accent2)'}">${surplusPos ? '+' : '−'}${fmt(Math.abs(d.surplusToDate))}</b><br>
+        При нынешнем темпе к концу месяца: <b style="color:${projPos ? 'var(--good)' : 'var(--accent2)'}">${projPos ? '+' : '−'}${fmt(Math.abs(d.projEndSurplus))}</b> ${projPos ? 'свободных' : 'перебор'}
+      </div>
+    </div>`;
+}
+
+// ===== Симулятор покупки «дотяну ли» =====
+function openAffordSim() {
+  const pic = getSpendingPicture();
+  const Braw = pic.breakEvenDaily;                 // сырой дневной бюджет (для гейта)
+  const B = Math.max(1, Math.round(Braw));         // для математики/слайдеров — минимум 1, без деления на 0
+  const spendStep = Math.max(1, Math.round(B / 50)); // адаптивный шаг ползунка трат (≈50 делений)
+  const remainingFree = pic.remainingFree;
+  const daysLeft = Math.max(1, daysLeftInMonth());
+  const host = document.getElementById('afford-sim-modal') || (() => {
+    const dv = document.createElement('div');
+    dv.id = 'afford-sim-modal';
+    dv.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:10000;padding:16px';
+    document.body.appendChild(dv);
+    return dv;
+  })();
+  host.dataset.b = String(B);
+  host.dataset.remainingFree = String(remainingFree);
+  host.dataset.daysLeft = String(daysLeft);
+
+  if (!(Braw > 0)) {
+    host.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;max-width:420px;width:100%;padding:20px">
+        <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;margin-bottom:8px">🛍 Дотяну ли на покупку?</div>
+        <div style="font-size:13px;color:var(--muted);line-height:1.5;margin-bottom:14px">Сейчас свободных денег на день нет (дневной бюджет 0). Сначала разберись с обязательными расходами и доходом — тогда симулятор заработает.</div>
+        <button class="btn btn-primary" style="width:100%" onclick="closeAffordSim()">Понятно</button>
+      </div>`;
+    return;
+  }
+
+  host.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;max-width:420px;width:100%;padding:20px;max-height:88vh;overflow:auto">
+      <div style="font-family:'Unbounded',sans-serif;font-size:16px;font-weight:700;margin-bottom:2px">🛍 Дотяну ли на покупку?</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px">Свободно в день: <b style="color:var(--text)">${fmt(B)}</b></div>
+      <div class="form-group">
+        <label>Цена покупки, ₽</label>
+        <input id="aff-price" type="number" inputmode="decimal" placeholder="20000" oninput="updateAffordSim('price')">
+      </div>
+      <div id="aff-body" style="display:none">
+        <div class="form-group">
+          <label>Трачу в день: <b id="aff-spend-lab">—</b></label>
+          <input id="aff-spend" type="range" min="0" max="${B}" step="${spendStep}" value="${Math.round(B/2)}" oninput="updateAffordSim('spend')" style="width:100%">
+        </div>
+        <div class="form-group">
+          <label>Готово за: <b id="aff-days-lab">—</b></label>
+          <input id="aff-days" type="range" min="1" max="90" step="1" value="7" oninput="updateAffordSim('days')" style="width:100%">
+        </div>
+        <div id="aff-readout" style="font-size:13px;line-height:1.6;padding:12px;background:var(--surface2);border-radius:10px"></div>
+      </div>
+      <div id="aff-hint" style="font-size:12px;color:var(--muted);margin-top:10px">Укажи цену — посчитаю, за сколько накопишь и потянешь ли сейчас.</div>
+      <button class="btn btn-primary" style="width:100%;margin-top:16px" onclick="closeAffordSim()">Закрыть</button>
+    </div>`;
+}
+function affDateAfter(n) {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+}
+function updateAffordSim(driver) {
+  const host = document.getElementById('afford-sim-modal');
+  if (!host) return;
+  const B = parseFloat(host.dataset.b) || 0;
+  const remainingFree = parseFloat(host.dataset.remainingFree) || 0;
+  const daysLeft = parseInt(host.dataset.daysLeft, 10) || 1;
+  const priceEl = document.getElementById('aff-price');
+  const body = document.getElementById('aff-body');
+  const hint = document.getElementById('aff-hint');
+  const P = parseAmount(priceEl ? priceEl.value : '');
+  if (!(P > 0)) { if (body) body.style.display = 'none'; if (hint) hint.style.display = 'block'; return; }
+  if (body) body.style.display = 'block';
+  if (hint) hint.style.display = 'none';
+
+  const spendEl = document.getElementById('aff-spend');
+  const daysEl = document.getElementById('aff-days');
+  // Границы слайдера дней зависят от цены: min = ⌈P/B⌉ (быстрее всего, тратя 0). Верхнюю границу делаем
+  // динамической, чтобы при дорогой покупке не получить min>max (битый range) и чтобы ползунок не врал.
+  const Nmin = Math.max(1, Math.ceil(P / B));
+  let res;
+  if (driver === 'days') {
+    const Nval = Math.max(Nmin, parseInt(daysEl.value, 10) || Nmin);
+    res = simAfford({ B, P, N: Nval, driver: 'days', daysLeft, remainingFree });
+  } else {
+    // 'spend' или 'price' — ведущий ползунок трат
+    res = simAfford({ B, P, S: parseFloat(spendEl.value), driver: 'spend', daysLeft, remainingFree });
+  }
+  // Верхняя граница ≥ Nmin и ≥ фактического N (если конечно), но не меньше 90 для нормального диапазона.
+  const Nmax = Math.max(90, Nmin, (res.ok && isFinite(res.N)) ? res.N : Nmin);
+  daysEl.min = String(Nmin);
+  daysEl.max = String(Nmax);
+  // Синхронизируем ведомый ползунок
+  if (driver === 'days') {
+    if (res.ok) spendEl.value = String(Math.round(res.S));
+  } else {
+    if (res.ok && isFinite(res.N)) daysEl.value = String(Math.max(Nmin, Math.min(Nmax, res.N)));
+  }
+  if (!res.ok) return;
+
+  document.getElementById('aff-spend-lab').textContent = fmt(res.S) + '/день';
+  document.getElementById('aff-days-lab').textContent = isFinite(res.N) ? `${res.N} ${pluralRu(res.N, 'день', 'дня', 'дней')}` : 'никогда';
+
+  const ro = document.getElementById('aff-readout');
+  if (res.perDaySaved < 1) {
+    // меньше рубля в день — фактически «не накопишь» (и fmt округлил бы до 0/день — самопротиворечиво)
+    ro.innerHTML = `<div style="color:var(--accent2)">Откладываешь ~0/день — так не накопишь. Снизь «трачу в день».</div>`;
+    return;
+  }
+  const feasColor = res.feasibleThisMonth ? 'var(--good)' : 'var(--accent2)';
+  const feasText = res.feasibleThisMonth ? '✓ успеешь в этом месяце' : '⚠ дольше, чем осталось дней в месяце';
+  const endPos = res.endSurplus >= 0;
+  const buyNow = res.buyNow.canNow
+    ? `Или купить сейчас → бюджет станет <b>${fmt(res.buyNow.leftDaily)}/день</b> до конца месяца`
+    : `Сейчас не хватает <b style="color:var(--accent2)">${fmt(res.buyNow.shortfall)}</b>`;
+  ro.innerHTML = `
+    <div>Откладываю <b style="color:var(--good)">${fmt(res.perDaySaved)}/день</b></div>
+    <div>Накоплю за <b>${res.N} ${pluralRu(res.N, 'день', 'дня', 'дней')}</b> — к <b>${esc(affDateAfter(res.N))}</b></div>
+    <div style="color:${feasColor}">${feasText}</div>
+    <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">Если держать этот темп до конца месяца — свободным ${endPos ? 'останется' : 'перебор'} <b style="color:${endPos ? 'var(--good)' : 'var(--accent2)'}">${endPos ? '+' : '−'}${fmt(Math.abs(res.endSurplus))}</b></div>
+    <div style="margin-top:6px;color:var(--muted)">${buyNow}</div>`;
+}
+function closeAffordSim() {
+  const host = document.getElementById('afford-sim-modal');
+  if (host) host.remove();
 }
 
 // Русское склонение по числу: pluralRu(1,'платёж','платежа','платежей') → 'платёж'
